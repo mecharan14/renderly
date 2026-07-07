@@ -295,6 +295,66 @@ pub fn timeline_duration(project: &Project) -> f64 {
         .fold(0.0_f64, f64::max)
 }
 
+/// Mix a slice of timeline audio into an in-memory WAV (for preview scrub/playback).
+pub fn mix_timeline_audio_segment(
+    project: &Project,
+    start_secs: f64,
+    duration_secs: f64,
+) -> Result<Vec<u8>, ExportError> {
+    if duration_secs <= 0.0 {
+        return Ok(Vec::new());
+    }
+    if !crate::media::ffmpeg_available() {
+        return Err(FfmpegCliError::NotFound.into());
+    }
+
+    let clips = collect_audio_clips(project);
+    if clips.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let end_secs = start_secs + duration_secs;
+    let mut shifted = Vec::new();
+    for clip in clips {
+        let clip_len = clip.source_out_secs - clip.source_in_secs;
+        let clip_end = clip.position_secs + clip_len;
+        let overlap_start = start_secs.max(clip.position_secs);
+        let overlap_end = end_secs.min(clip_end);
+        if overlap_end <= overlap_start {
+            continue;
+        }
+        let offset = overlap_start - clip.position_secs;
+        shifted.push(AudioMixClip {
+            path: clip.path.clone(),
+            position_secs: overlap_start - start_secs,
+            source_in_secs: clip.source_in_secs + offset,
+            source_out_secs: clip.source_in_secs + offset + (overlap_end - overlap_start),
+            gain_db: clip.gain_db,
+            fade_in_secs: clip.fade_in_secs,
+            fade_out_secs: clip.fade_out_secs,
+            role: clip.role,
+        });
+    }
+    if shifted.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let temp_dir = std::env::temp_dir().join(format!("uppercut-scrub-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).map_err(FfmpegCliError::Io)?;
+    let temp_wav = temp_dir.join("segment.wav");
+    let duck = duck_settings(project);
+    mix_timeline_audio(
+        &shifted,
+        project.settings.sample_rate,
+        duration_secs,
+        &temp_wav,
+        duck,
+    )?;
+    let bytes = std::fs::read(&temp_wav).map_err(FfmpegCliError::Io)?;
+    std::fs::remove_dir_all(&temp_dir).ok();
+    Ok(bytes)
+}
+
 fn active_layers(project: &Project, t: f64) -> Result<Vec<ActiveLayer>, ExportError> {
     let mut layers = Vec::new();
 
@@ -459,5 +519,12 @@ mod tests {
                 fade_out_secs: 0.0,
             }));
         assert!((timeline_duration(&project) - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mix_timeline_audio_segment_empty_without_audio() {
+        let project = Project::new("t", Settings::default());
+        let bytes = mix_timeline_audio_segment(&project, 0.0, 0.5).unwrap();
+        assert!(bytes.is_empty());
     }
 }

@@ -1,6 +1,6 @@
 # Command API — v0
 
-Status: **Phase 1 complete**. This is the source of truth for the `Command` enum and
+Status: **Phase 2 complete**. This is the source of truth for the `Command` enum and
 `apply_command` in `uppercut-core`. GUI, CLI, and MCP must all dispatch through this exact
 set (see AGENTS.md §0.1) — none of them may mutate `Project` state any other way.
 
@@ -16,6 +16,7 @@ pub enum Command {
     MoveClip { track_id: Id, clip_id: Id, new_position_secs: f64, new_track_id: Option<Id> },
     DeleteClip { track_id: Id, clip_id: Id, ripple: bool },
     AddCaption { track_id: Id, text: String, position_secs: f64, duration_secs: f64, style_id: String },
+    SetCaption { track_id: Id, clip_id: Id, text: Option<String>, position_secs: Option<f64>, duration_secs: Option<f64>, style_id: Option<String> },
     SetAudioGain { track_id: Id, clip_id: Id, gain_db: f64 },
     GenerateCaptions { media_id: Id, track_id: Id, style_id: String, timeline_offset_secs: f64 },
     GenerateVoiceover { text: String, track_id: Id, position_secs: f64, output_path: String, provider: VoiceoverProvider },
@@ -91,6 +92,14 @@ Adds a `CaptionClip` with `text` at `position_secs` for `duration_secs`, tagged 
 track must be `kind: "caption"`.
 
 - Errors: track kind mismatch, overlap with existing caption clip on that track.
+
+### `SetCaption` (Phase 2)
+Updates an existing `CaptionClip` on a caption track. At least one of `text`,
+`position_secs`, `duration_secs`, or `style_id` must be `Some`. Omitted fields are left
+unchanged. Used by the GUI caption inspector.
+
+- Errors: track/clip not found, track kind mismatch, no fields to change, or resulting
+  overlap with another caption on the same track.
 
 ### `SetAudioGain`
 Sets `gain_db` on an audio-bearing clip (`AudioClip`, or a `VideoClip` with embedded audio

@@ -1,0 +1,2 @@
+# Prevent dev watcher rebuild loops when icon assets are touched by the build.
+icons/

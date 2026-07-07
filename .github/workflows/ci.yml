@@ -25,6 +25,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: uppercut-app/package-lock.json
+
+      - name: Build frontend
+        run: npm ci && npm run build
+        working-directory: uppercut-app
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 

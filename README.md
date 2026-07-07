@@ -16,11 +16,11 @@ Not affiliated with, endorsed by, or a clone of any existing commercial editor.
 
 ## Status
 
-**Early / pre-alpha — Phase 1 complete.** CLI and MCP drive the full command API end to end.
+**Early / pre-alpha — Phase 2 complete.** CLI and MCP drive the full command API end to end.
 Export renders video with burned-in captions, mixed audio (fades + music ducking), and
-supports Whisper auto-captions, Piper/OpenAI voiceover, and perception tools (frame preview,
-transcript, silence/scene detection, waveform peaks). Requires FFmpeg on PATH; optional
-Whisper, Piper, or OpenAI key for AI features. GUI is Phase 2.
+supports Whisper auto-captions, Piper/OpenAI voiceover, and perception tools. The Tauri
+desktop app (Windows) provides a full GUI MVP: media bin, timeline editing, native GPU preview,
+audio scrub playback, caption inspector, and export dialog.
 
 Read [PLAN.md](PLAN.md) for the full vision, tech stack rationale, and phased roadmap
 before contributing or building on this.
@@ -57,8 +57,8 @@ Windows first, macOS/Linux to follow. AGPL-3.0.
 - **Phase 0** — done: schema, commands, CLI export spine (FFmpeg → wgpu → H.264).
 - **Phase 1** — done: MCP server, Whisper captions, TTS voiceover, audio fades/ducking,
   perception tools (silence, scenes, peaks, frame render, transcript).
-- **Phase 2 (current)** — GUI MVP: timeline, native preview, direct manipulation, export dialog.
-- **Phase 3** — effects, transitions, keyframes, the WASM plugin SDK and asset pack format.
+- **Phase 2** — done: Tauri GUI with timeline tools, native preview (Windows), audio scrub, export.
+- **Phase 3 (current)** — effects, transitions, keyframes, WASM plugin SDK and asset pack format.
 - **Phase 4** — community-driven feature parity march (background removal, motion tracking,
   templates, and more), mostly landing as plugins rather than core code.
 
@@ -94,6 +94,19 @@ cargo run -p uppercut-mcp
 See [docs/mcp-agent-guide.md](docs/mcp-agent-guide.md) for tool list and a script-to-export workflow.
 Set `UPPERCUT_WHISPER_MODEL` for auto-captions, `UPPERCUT_PIPER_MODEL` for local TTS, or
 `OPENAI_API_KEY` for OpenAI voiceover.
+
+### Desktop app (Phase 2)
+
+Requires Node.js 20+ and FFmpeg on PATH.
+
+```sh
+cd uppercut-app
+npm install
+npm run tauri dev
+```
+
+The webview UI dispatches all edits via `apply_command`; preview frames render on a native
+wgpu surface (Windows only in v1).
 
 ## Contributing
 

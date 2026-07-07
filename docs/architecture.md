@@ -1,9 +1,10 @@
 # Architecture
 
-Status: **Phase 0 — media spine landed.** Export drives FFmpeg subprocess decode/encode
-with an offscreen wgpu compositor in between. Linked libav via `ffmpeg-the-third` replaces
-the subprocess bridge once vcpkg/FFMPEG_DIR is standard in dev/CI. Later phases add effects
-graph, plugin host, and GUI — see [PLAN.md](../PLAN.md).
+Status: **Phase 2 complete.** Export drives FFmpeg subprocess decode/encode with an
+offscreen wgpu compositor; the Tauri app adds a native wgpu preview surface on Windows.
+Linked libav via `ffmpeg-the-third` replaces the subprocess bridge once vcpkg/FFMPEG_DIR is
+standard in dev/CI. Later phases add effects graph, plugin host, and full direct-manipulation
+timeline tools — see [PLAN.md](../PLAN.md).
 
 ## Crate graph
 
@@ -80,12 +81,17 @@ Two rendering surfaces coexist in one window:
 
 - **Webview** — UI chrome: media bin, timeline widget (canvas-rendered inside the webview
   or a native overlay — decide in Phase 2), inspectors, dialogs.
-- **Native preview surface** — a wgpu surface embedded via `raw-window-handle`, receiving
-  decoded/composited frames directly from `uppercut-core`. Never proxies frames through the
-  webview/JS bridge; that round-trip is the performance hazard this project explicitly
-  designs around (see PLAN.md §3, §7).
+- **Native preview surface** — a wgpu child HWND on Windows (Phase 2 v1), receiving
+  composited frames from `render_frame_at` in `uppercut-core`. Never proxies frames through
+  the webview/JS bridge.
 
-Not yet scaffolded as of Phase 0 — lands in Phase 2 per the roadmap.
+Phase 2 MVP (complete): media bin, canvas timeline with drag/trim/split/razor/snap/zoom,
+transport with audio scrub, caption inspector (`SetCaption`), export dialog. macOS/Linux
+preview surfaces land in Phase 3.
+
+Tauri commands: `new_project`, `open_project`, `save_project`, `get_project`, `apply_command`,
+`export_project`, `set_preview_bounds`, `update_preview`, `start_playback`, `stop_playback`,
+`scrub_audio`.
 
 ## Plugins (Phase 3+)
 

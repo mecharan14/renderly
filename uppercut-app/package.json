@@ -1,0 +1,19 @@
+{
+  "name": "uppercut-app",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/api": "^2.11.0",
+    "@tauri-apps/plugin-dialog": "^2.3.0",
+    "@tauri-apps/cli": "^2.11.0",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  }
+}

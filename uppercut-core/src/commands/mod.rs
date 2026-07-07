@@ -53,6 +53,15 @@ pub enum Command {
         duration_secs: f64,
         style_id: String,
     },
+    /// Update an existing caption clip (Phase 2 caption editor).
+    SetCaption {
+        track_id: Id,
+        clip_id: Id,
+        text: Option<String>,
+        position_secs: Option<f64>,
+        duration_secs: Option<f64>,
+        style_id: Option<String>,
+    },
     SetAudioGain {
         track_id: Id,
         clip_id: Id,
@@ -132,6 +141,8 @@ pub enum CommandError {
     SplitOutOfBounds(f64),
     #[error("TrimClip requires at least one of new_source_in_secs/new_source_out_secs")]
     TrimRequiresChange,
+    #[error("SetCaption requires at least one field to change")]
+    SetCaptionRequiresChange,
     #[error("clip has no audio: {0}")]
     NoAudio(Id),
     #[error("{0}")]
@@ -203,6 +214,22 @@ pub fn apply_command(project: &mut Project, cmd: Command) -> Result<CommandOutco
         } => add_caption(
             project,
             track_id,
+            text,
+            position_secs,
+            duration_secs,
+            style_id,
+        ),
+        Command::SetCaption {
+            track_id,
+            clip_id,
+            text,
+            position_secs,
+            duration_secs,
+            style_id,
+        } => set_caption(
+            project,
+            track_id,
+            clip_id,
             text,
             position_secs,
             duration_secs,
@@ -597,6 +624,74 @@ fn add_caption(
     }));
 
     Ok(CommandOutcome::ClipAdded { clip_id })
+}
+
+fn set_caption(
+    project: &mut Project,
+    track_id: Id,
+    clip_id: Id,
+    text: Option<String>,
+    position_secs: Option<f64>,
+    duration_secs: Option<f64>,
+    style_id: Option<String>,
+) -> Result<CommandOutcome, CommandError> {
+    if text.is_none() && position_secs.is_none() && duration_secs.is_none() && style_id.is_none() {
+        return Err(CommandError::SetCaptionRequiresChange);
+    }
+
+    let track = project
+        .find_track(track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    if track.kind != TrackKind::Caption {
+        return Err(CommandError::TrackKindMismatch(
+            track_id,
+            track.kind,
+            TrackKind::Caption,
+        ));
+    }
+
+    let new_position = position_secs.unwrap_or_else(|| {
+        track
+            .find_clip(clip_id)
+            .map(|c| c.position_secs())
+            .unwrap_or(0.0)
+    });
+    let new_duration = duration_secs.unwrap_or_else(|| {
+        track
+            .find_clip(clip_id)
+            .map(|c| c.duration_secs())
+            .unwrap_or(0.1)
+    });
+
+    check_no_overlap(track, new_position, new_duration, Some(clip_id))?;
+
+    let track = project
+        .find_track_mut(track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    let clip = track
+        .clips
+        .iter_mut()
+        .find(|c| c.id() == clip_id)
+        .ok_or(CommandError::ClipNotFound(clip_id, track_id))?;
+
+    match clip {
+        Clip::Caption(c) => {
+            if let Some(t) = text {
+                c.text = t;
+            }
+            if let Some(p) = position_secs {
+                c.position_secs = p;
+            }
+            if let Some(d) = duration_secs {
+                c.duration_secs = d;
+            }
+            if let Some(s) = style_id {
+                c.style_id = s;
+            }
+            Ok(CommandOutcome::Applied)
+        }
+        _ => Err(CommandError::ClipNotFound(clip_id, track_id)),
+    }
 }
 
 fn export_project_cmd(
@@ -1079,6 +1174,81 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, CommandError::TrackKindMismatch(_, _, _)));
+    }
+
+    #[test]
+    fn set_caption_updates_text_and_timing() {
+        let mut project = test_project();
+        let track_id = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Caption,
+                name: "C1".into(),
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+
+        let clip_id = match apply_command(
+            &mut project,
+            Command::AddCaption {
+                track_id,
+                text: "hello".into(),
+                position_secs: 1.0,
+                duration_secs: 2.0,
+                style_id: "tiktok-bold-yellow".into(),
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::ClipAdded { clip_id } => clip_id,
+            _ => unreachable!(),
+        };
+
+        apply_command(
+            &mut project,
+            Command::SetCaption {
+                track_id,
+                clip_id,
+                text: Some("updated".into()),
+                position_secs: Some(1.5),
+                duration_secs: Some(2.5),
+                style_id: None,
+            },
+        )
+        .unwrap();
+
+        let clip = project
+            .find_track(track_id)
+            .unwrap()
+            .find_clip(clip_id)
+            .unwrap();
+        match clip {
+            Clip::Caption(c) => {
+                assert_eq!(c.text, "updated");
+                assert!((c.position_secs - 1.5).abs() < 1e-9);
+                assert!((c.duration_secs - 2.5).abs() < 1e-9);
+                assert_eq!(c.style_id, "tiktok-bold-yellow");
+            }
+            _ => panic!("expected caption clip"),
+        }
+
+        let err = apply_command(
+            &mut project,
+            Command::SetCaption {
+                track_id,
+                clip_id,
+                text: None,
+                position_secs: None,
+                duration_secs: None,
+                style_id: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::SetCaptionRequiresChange));
     }
 
     #[test]

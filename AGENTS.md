@@ -86,11 +86,10 @@ Before considering a change complete:
 
 ## 4. Current phase
 
-Check PLAN.md §4 for the phase roadmap. **Phase 1 is complete:** MCP server v1, Whisper
-auto-captions, caption burn-in, multi-track audio mix with fades and music ducking, TTS
-voiceover (`GenerateVoiceover`), and perception tools (transcript, frame render, silence,
-scenes, audio peaks). Do not jump to GUI (Phase 2) until you have a concrete GUI milestone
-from PLAN.md §4.
+Check PLAN.md §4 for the phase roadmap. **Phase 2 is complete:** Tauri 2 GUI MVP with media bin,
+canvas timeline (drag, trim, split, razor, snap, zoom), native wgpu preview (Windows),
+transport with audio scrub, caption inspector, and export dialog. Phase 3 (effects, WASM
+plugins) is next.
 
 ## 5. When in doubt
 
