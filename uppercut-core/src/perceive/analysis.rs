@@ -154,10 +154,20 @@ pub fn audio_peaks(path: &Path, buckets: u32) -> Result<AudioPeaks, AnalysisErro
     }
 
     let samples: &[f32] = bytemuck::cast_slice(&output.stdout);
+    let peaks = bucket_peaks(samples, buckets);
+
+    Ok(AudioPeaks { bucket_secs, peaks })
+}
+
+/// Downsample `samples` into `buckets` peak values. Guards against `buckets` exceeding the
+/// sample count (very short clips, or a large requested bucket count): `samples_per_bucket`
+/// floors to >= 1, so without clamping the start index, `i * samples_per_bucket` can exceed
+/// `samples.len()` and panic by slicing with start > end.
+fn bucket_peaks(samples: &[f32], buckets: u32) -> Vec<f32> {
     let samples_per_bucket = (samples.len() as f64 / buckets as f64).max(1.0) as usize;
     let mut peaks = Vec::with_capacity(buckets as usize);
     for i in 0..buckets as usize {
-        let start = i * samples_per_bucket;
+        let start = (i * samples_per_bucket).min(samples.len());
         let end = ((i + 1) * samples_per_bucket).min(samples.len());
         let peak = samples[start..end]
             .iter()
@@ -165,8 +175,7 @@ pub fn audio_peaks(path: &Path, buckets: u32) -> Result<AudioPeaks, AnalysisErro
             .fold(0.0_f32, f32::max);
         peaks.push(peak);
     }
-
-    Ok(AudioPeaks { bucket_secs, peaks })
+    peaks
 }
 
 fn media_duration(path: &Path) -> f64 {
@@ -191,5 +200,25 @@ mod tests {
         let spans = parse_silence(stderr).unwrap();
         assert_eq!(spans.len(), 1);
         assert!((spans[0].duration_secs - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn bucket_peaks_does_not_panic_when_buckets_exceed_samples() {
+        // A very short clip (few samples) with many requested buckets used to panic:
+        // `i * samples_per_bucket` could exceed `samples.len()` while `end` stayed clamped,
+        // producing a `start > end` slice panic.
+        let samples = [0.1_f32, 0.5, 0.2];
+        let peaks = bucket_peaks(&samples, 256);
+        assert_eq!(peaks.len(), 256);
+        assert!(peaks.iter().any(|&p| p > 0.0));
+    }
+
+    #[test]
+    fn bucket_peaks_finds_max_abs_per_bucket() {
+        let samples = [0.1_f32, -0.9, 0.2, 0.3];
+        let peaks = bucket_peaks(&samples, 2);
+        assert_eq!(peaks.len(), 2);
+        assert!((peaks[0] - 0.9).abs() < 1e-6);
+        assert!((peaks[1] - 0.3).abs() < 1e-6);
     }
 }

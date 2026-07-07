@@ -315,6 +315,14 @@ fn clip_kind_matches(track_kind: TrackKind, clip: &Clip) -> bool {
     )
 }
 
+fn clip_track_kind(clip: &Clip) -> TrackKind {
+    match clip {
+        Clip::Video(_) => TrackKind::Video,
+        Clip::Audio(_) => TrackKind::Audio,
+        Clip::Caption(_) => TrackKind::Caption,
+    }
+}
+
 fn check_no_overlap(
     track: &Track,
     position_secs: f64,
@@ -523,7 +531,7 @@ fn move_clip(
             return Err(CommandError::TrackKindMismatch(
                 dest_track_id,
                 dest_track.kind,
-                dest_track.kind,
+                clip_track_kind(&clip),
             ));
         }
     }
@@ -650,18 +658,14 @@ fn set_caption(
         ));
     }
 
-    let new_position = position_secs.unwrap_or_else(|| {
-        track
-            .find_clip(clip_id)
-            .map(|c| c.position_secs())
-            .unwrap_or(0.0)
-    });
-    let new_duration = duration_secs.unwrap_or_else(|| {
-        track
-            .find_clip(clip_id)
-            .map(|c| c.duration_secs())
-            .unwrap_or(0.1)
-    });
+    // Resolve the existing clip first: if `clip_id` doesn't exist, report ClipNotFound
+    // rather than silently defaulting position/duration to 0.0/0.1 and risking a
+    // misleading Overlap error instead.
+    let existing = track
+        .find_clip(clip_id)
+        .ok_or(CommandError::ClipNotFound(clip_id, track_id))?;
+    let new_position = position_secs.unwrap_or_else(|| existing.position_secs());
+    let new_duration = duration_secs.unwrap_or_else(|| existing.duration_secs());
 
     check_no_overlap(track, new_position, new_duration, Some(clip_id))?;
 
@@ -741,15 +745,24 @@ fn generate_captions(
         }
         let duration = (seg.end_secs - seg.start_secs).max(0.1);
         let position = timeline_offset_secs + seg.start_secs;
-        add_caption(
+        // Skip segments that fail to place (e.g. two whisper segments landing on
+        // overlapping timestamps) instead of aborting the whole batch via `?` — an error
+        // partway through would otherwise still leave the already-added captions mutated
+        // into `project` while reporting failure, silently losing the rest of the
+        // transcript. Best-effort captioning of everything that fits is more useful to an
+        // agent than an all-or-nothing batch.
+        if add_caption(
             project,
             track_id,
             text.to_string(),
             position,
             duration,
             style_id.clone(),
-        )?;
-        count += 1;
+        )
+        .is_ok()
+        {
+            count += 1;
+        }
     }
 
     Ok(CommandOutcome::CaptionsGenerated { count })
@@ -1249,6 +1262,113 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, CommandError::SetCaptionRequiresChange));
+    }
+
+    #[test]
+    fn set_caption_reports_clip_not_found_not_overlap() {
+        // A bogus clip_id used to fall through to default position/duration (0.0/0.1)
+        // before failing, which could spuriously report Overlap instead of ClipNotFound
+        // if those defaults happened to collide with an existing caption.
+        let mut project = test_project();
+        let track_id = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Caption,
+                name: "C1".into(),
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        apply_command(
+            &mut project,
+            Command::AddCaption {
+                track_id,
+                text: "hello".into(),
+                position_secs: 0.0,
+                duration_secs: 0.1,
+                style_id: "tiktok-bold-yellow".into(),
+            },
+        )
+        .unwrap();
+
+        let err = apply_command(
+            &mut project,
+            Command::SetCaption {
+                track_id,
+                clip_id: Id::new_v4(),
+                text: Some("nope".into()),
+                position_secs: None,
+                duration_secs: None,
+                style_id: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::ClipNotFound(_, _)));
+    }
+
+    #[test]
+    fn move_clip_kind_mismatch_reports_clip_kind_not_dest_kind_twice() {
+        let mut project = test_project();
+        let video_track = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Video,
+                name: "V1".into(),
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        let caption_track = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Caption,
+                name: "C1".into(),
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        let clip_id = match apply_command(
+            &mut project,
+            Command::AddCaption {
+                track_id: caption_track,
+                text: "hi".into(),
+                position_secs: 0.0,
+                duration_secs: 1.0,
+                style_id: "tiktok-bold-yellow".into(),
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::ClipAdded { clip_id } => clip_id,
+            _ => unreachable!(),
+        };
+
+        let err = apply_command(
+            &mut project,
+            Command::MoveClip {
+                track_id: caption_track,
+                clip_id,
+                new_position_secs: 0.0,
+                new_track_id: Some(video_track),
+            },
+        )
+        .unwrap_err();
+        match err {
+            CommandError::TrackKindMismatch(_, dest_kind, expected_kind) => {
+                assert_eq!(dest_kind, TrackKind::Video);
+                assert_eq!(expected_kind, TrackKind::Caption);
+            }
+            other => panic!("expected TrackKindMismatch, got {other:?}"),
+        }
     }
 
     #[test]

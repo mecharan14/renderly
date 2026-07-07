@@ -13,6 +13,35 @@ pub enum ComposeError {
     Wgpu(String),
 }
 
+/// Matches the `LayerTransform` uniform struct in composite.wgsl: two tightly-packed
+/// `vec2<f32>` fields (scale, then offset), 16 bytes total, no padding.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct LayerTransformUniform {
+    scale: [f32; 2],
+    offset: [f32; 2],
+}
+
+/// "Cover" fit: scale/offset (in source-texture UV space) that fill the output rect
+/// without distorting the layer's aspect ratio, cropping whichever axis overflows.
+/// Identity when the layer already matches the output aspect ratio (e.g. caption layers,
+/// which are already rendered at the output resolution).
+fn cover_transform(layer_w: u32, layer_h: u32, out_w: u32, out_h: u32) -> LayerTransformUniform {
+    let layer_aspect = layer_w as f32 / layer_h as f32;
+    let out_aspect = out_w as f32 / out_h as f32;
+    let (scale_x, scale_y) = if layer_aspect > out_aspect {
+        // Layer is relatively wider than the output: crop its left/right edges.
+        (out_aspect / layer_aspect, 1.0)
+    } else {
+        // Layer is relatively taller (or equal) than the output: crop top/bottom.
+        (1.0, layer_aspect / out_aspect)
+    };
+    LayerTransformUniform {
+        scale: [scale_x, scale_y],
+        offset: [(1.0 - scale_x) / 2.0, (1.0 - scale_y) / 2.0],
+    }
+}
+
 pub struct Compositor {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -111,6 +140,16 @@ impl Compositor {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
             ],
@@ -222,6 +261,21 @@ impl Compositor {
                 );
                 let view = texture.create_view(&Default::default());
 
+                // A dedicated buffer per layer (created with its final contents up front,
+                // rather than `queue.write_buffer`'d into a shared buffer) so each draw
+                // call in this single render pass gets its own transform: `write_buffer`
+                // calls made while recording — before the encoder is submitted — would all
+                // land before any of this pass's draws execute on the GPU, leaving a
+                // shared buffer holding only the last layer's value for every draw.
+                let transform = cover_transform(layer.width, layer.height, self.width, self.height);
+                let transform_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("layer-transform"),
+                            contents: bytemuck::bytes_of(&transform),
+                            usage: wgpu::BufferUsages::UNIFORM,
+                        });
+
                 let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("layer-bind"),
                     layout: &self.bind_group_layout,
@@ -233,6 +287,10 @@ impl Compositor {
                         wgpu::BindGroupEntry {
                             binding: 1,
                             resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: transform_buffer.as_entire_binding(),
                         },
                     ],
                 });
@@ -300,5 +358,52 @@ impl Compositor {
         self.readback_buffer.unmap();
 
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cover_transform_is_identity_for_matching_aspect_ratio() {
+        let t = cover_transform(1080, 1920, 1080, 1920);
+        assert!((t.scale[0] - 1.0).abs() < 1e-6);
+        assert!((t.scale[1] - 1.0).abs() < 1e-6);
+        assert!((t.offset[0] - 0.0).abs() < 1e-6);
+        assert!((t.offset[1] - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cover_transform_crops_sides_for_wider_landscape_source_into_vertical_output() {
+        // 16:9 gameplay footage into a 9:16 TikTok export: the source is relatively wider
+        // than the output, so covering it means cropping the left/right edges (scale_x < 1)
+        // while using the full height (scale_y == 1) — never stretching either axis.
+        let t = cover_transform(1920, 1080, 1080, 1920);
+        assert!(t.scale[0] < 1.0, "expected horizontal crop, got {t:?}");
+        assert!(
+            (t.scale[1] - 1.0).abs() < 1e-6,
+            "expected full height, got {t:?}"
+        );
+        assert!(
+            (t.offset[0] - (1.0 - t.scale[0]) / 2.0).abs() < 1e-6,
+            "crop should be centered"
+        );
+        assert!((t.offset[1] - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cover_transform_crops_top_bottom_for_taller_source_into_landscape_output() {
+        let t = cover_transform(1080, 1920, 1920, 1080);
+        assert!(
+            (t.scale[0] - 1.0).abs() < 1e-6,
+            "expected full width, got {t:?}"
+        );
+        assert!(t.scale[1] < 1.0, "expected vertical crop, got {t:?}");
+        assert!((t.offset[0] - 0.0).abs() < 1e-6);
+        assert!(
+            (t.offset[1] - (1.0 - t.scale[1]) / 2.0).abs() < 1e-6,
+            "crop should be centered"
+        );
     }
 }

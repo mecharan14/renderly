@@ -44,14 +44,15 @@ impl AudioScrubEngine {
     }
 
     pub fn play_once(&self, project: &Project, time_secs: f64) -> Result<(), String> {
-        let wav = mix_timeline_audio_segment(project, time_secs, 0.08).map_err(|e| e.to_string())?;
+        let wav =
+            mix_timeline_audio_segment(project, time_secs, 0.08).map_err(|e| e.to_string())?;
         if wav.is_empty() {
             return Ok(());
         }
-        let stream = OutputStreamBuilder::open_default_stream().map_err(|e| format!("audio: {e}"))?;
+        let stream =
+            OutputStreamBuilder::open_default_stream().map_err(|e| format!("audio: {e}"))?;
         let sink = Sink::connect_new(stream.mixer());
-        let decoder =
-            Decoder::new_wav(Cursor::new(wav)).map_err(|e| format!("wav decode: {e}"))?;
+        let decoder = Decoder::new_wav(Cursor::new(wav)).map_err(|e| format!("wav decode: {e}"))?;
         sink.append(decoder);
         sink.sleep_until_end();
         Ok(())
@@ -64,7 +65,8 @@ impl AudioScrubEngine {
         fps: f64,
     ) -> Result<(), String> {
         self.stop();
-        let stream = OutputStreamBuilder::open_default_stream().map_err(|e| format!("audio: {e}"))?;
+        let stream =
+            OutputStreamBuilder::open_default_stream().map_err(|e| format!("audio: {e}"))?;
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = Arc::clone(&stop);
         let sink = Sink::connect_new(stream.mixer());

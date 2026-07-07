@@ -379,9 +379,9 @@ fn ensure_child_window(
     use windows::Win32::Foundation::HWND;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
-        HWND_TOP, SWP_NOACTIVATE, SWP_FRAMECHANGED, SWP_SHOWWINDOW, SW_SHOW, WINDOW_EX_STYLE,
-        WINDOW_STYLE, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT, WS_VISIBLE,
+        CreateWindowExW, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+        GWL_EXSTYLE, HWND_TOP, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_SHOW,
+        WINDOW_EX_STYLE, WINDOW_STYLE, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT, WS_VISIBLE,
     };
 
     register_preview_class();

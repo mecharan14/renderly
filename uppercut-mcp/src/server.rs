@@ -211,7 +211,10 @@ impl UppercutMcp {
         })
     }
 
-    #[tool(description = "Apply one uppercut-core Command and save the project")]
+    #[tool(
+        name = "apply_command",
+        description = "Apply one uppercut-core Command and save the project"
+    )]
     fn apply_command_tool(&self, Parameters(req): Parameters<ApplyCommandRequest>) -> String {
         self.apply_command_impl(req)
             .unwrap_or_else(|e| format!("error: {e}"))
@@ -246,7 +249,10 @@ impl UppercutMcp {
         })
     }
 
-    #[tool(description = "Detect silent spans in a project media item (FFmpeg silencedetect)")]
+    #[tool(
+        name = "detect_silence",
+        description = "Detect silent spans in a project media item (FFmpeg silencedetect)"
+    )]
     fn detect_silence_tool(&self, Parameters(req): Parameters<SilenceDetectRequest>) -> String {
         self.detect_silence_impl(req)
             .unwrap_or_else(|e| format!("error: {e}"))
@@ -265,7 +271,10 @@ impl UppercutMcp {
         })
     }
 
-    #[tool(description = "Detect scene cuts in a project media item (FFmpeg scene filter)")]
+    #[tool(
+        name = "detect_scenes",
+        description = "Detect scene cuts in a project media item (FFmpeg scene filter)"
+    )]
     fn detect_scenes_tool(&self, Parameters(req): Parameters<SceneDetectRequest>) -> String {
         self.detect_scenes_impl(req)
             .unwrap_or_else(|e| format!("error: {e}"))

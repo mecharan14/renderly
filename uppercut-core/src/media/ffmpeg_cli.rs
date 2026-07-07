@@ -395,10 +395,21 @@ pub fn mix_timeline_audio(
             mix_clip_bus(&voice_clips, sample_rate, duration_secs, &voice_wav)?;
             mix_clip_bus(&music_clips, sample_rate, duration_secs, &music_wav)?;
 
-            let makeup = db_to_linear(-duck_cfg.duck_db);
-            let filter = format!(
-                "[0:a][1:a]sidechaincompress=threshold=0.02:ratio=8:attack=200:release=1000,volume={makeup:.6}[out]"
-            );
+            // `sidechaincompress` alone already produces the gain reduction ("ducking")
+            // when the voice/dialog sidechain is active; no extra gain stage is applied
+            // after it. An earlier version chained `volume={db_to_linear(-duck_db)}` here,
+            // which for the default duck_db=-12 computed a +12dB *boost* on the whole
+            // compressed signal (right sign flipped: -(-12) = +12) — that boost applied
+            // uniformly to both ducked and non-ducked passages, undoing the compressor's
+            // reduction during dialogue and amplifying the music beyond its original level
+            // the rest of the time. `duck_cfg.duck_db`'s magnitude isn't yet mapped to a
+            // precise output dB target (only its sign gates ducking on/off, see
+            // `duck_settings` in export/mod.rs) — a follow-up could tune ratio/threshold
+            // from it, but leaving gain at unity here is the safe, clearly-correct default.
+            let _ = duck_cfg.duck_db;
+            let filter =
+                "[0:a][1:a]sidechaincompress=threshold=0.02:ratio=8:attack=200:release=1000[out]"
+                    .to_string();
             let status = Command::new(ffmpeg_path()?)
                 .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
                 .arg(&music_wav)

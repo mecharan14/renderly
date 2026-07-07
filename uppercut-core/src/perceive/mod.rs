@@ -124,27 +124,35 @@ pub fn transcribe_media(project: &Project, media_id: Uuid) -> Result<Transcript,
     let json_path = dir.join("out.json");
     let data = std::fs::read_to_string(&json_path)
         .map_err(|e| PerceiveError::WhisperFailed(e.to_string()))?;
-    let parsed: WhisperJson =
-        serde_json::from_str(&data).map_err(|e| PerceiveError::WhisperFailed(e.to_string()))?;
-
-    let segments = parsed
-        .transcription
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|s| {
-            let start = s.timestamps.as_ref()?.from.parse::<f64>().ok()?;
-            let end = s.timestamps.as_ref()?.to.parse::<f64>().ok()?;
-            Some(TranscriptSegment {
-                start_secs: start,
-                end_secs: end,
-                text: s.text.trim().to_string(),
-            })
-        })
-        .collect();
+    let segments =
+        parse_whisper_json(&data).map_err(|e| PerceiveError::WhisperFailed(e.to_string()))?;
 
     std::fs::remove_dir_all(&dir).ok();
 
     Ok(Transcript { media_id, segments })
+}
+
+/// Parse whisper.cpp's `-oj` JSON output into transcript segments.
+///
+/// whisper.cpp emits both `timestamps` (human-readable `"HH:MM:SS,mmm"` strings, for
+/// display) and `offsets` (integer milliseconds, for machine use) per segment. Parsing
+/// `timestamps` as a float — as earlier code here did — always fails to parse and silently
+/// drops every segment via `filter_map`, so `offsets` (ms) is the field to use.
+fn parse_whisper_json(data: &str) -> Result<Vec<TranscriptSegment>, String> {
+    let parsed: WhisperJson = serde_json::from_str(data).map_err(|e| e.to_string())?;
+    Ok(parsed
+        .transcription
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|s| {
+            let offsets = s.offsets?;
+            Some(TranscriptSegment {
+                start_secs: offsets.from as f64 / 1000.0,
+                end_secs: offsets.to as f64 / 1000.0,
+                text: s.text.trim().to_string(),
+            })
+        })
+        .collect())
 }
 
 fn find_whisper_cli() -> Option<PathBuf> {
@@ -177,12 +185,45 @@ struct WhisperJson {
 
 #[derive(Debug, Deserialize)]
 struct WhisperSegment {
-    timestamps: Option<WhisperTimestamps>,
+    offsets: Option<WhisperOffsets>,
     text: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct WhisperTimestamps {
-    from: String,
-    to: String,
+struct WhisperOffsets {
+    from: u64,
+    to: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_whisper_json_uses_offsets_not_display_timestamps() {
+        // Real whisper.cpp `-oj` shape: `timestamps` are SRT-style display strings that
+        // must NOT be parsed as floats; `offsets` (ms) are the numeric source of truth.
+        let data = r#"{
+            "transcription": [
+                {
+                    "timestamps": { "from": "00:00:00,000", "to": "00:00:02,500" },
+                    "offsets": { "from": 0, "to": 2500 },
+                    "text": " he just does NOT miss"
+                },
+                {
+                    "timestamps": { "from": "00:00:02,500", "to": "00:00:04,000" },
+                    "offsets": { "from": 2500, "to": 4000 },
+                    "text": " unbelievable"
+                }
+            ]
+        }"#;
+
+        let segments = parse_whisper_json(data).unwrap();
+        assert_eq!(segments.len(), 2);
+        assert!((segments[0].start_secs - 0.0).abs() < 1e-9);
+        assert!((segments[0].end_secs - 2.5).abs() < 1e-9);
+        assert_eq!(segments[0].text, "he just does NOT miss");
+        assert!((segments[1].start_secs - 2.5).abs() < 1e-9);
+        assert!((segments[1].end_secs - 4.0).abs() < 1e-9);
+    }
 }
