@@ -6,13 +6,15 @@
 mod ffmpeg_cli;
 
 use crate::project::MediaKind;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use thiserror::Error;
 
 pub use ffmpeg_cli::{
-    ffmpeg_path, ffprobe_path, is_available as ffmpeg_available, FfmpegCliError, RgbaFrame,
+    ffmpeg_path, ffprobe_path, is_available as ffmpeg_available, mix_timeline_audio,
+    mux_video_audio, probe_video, AudioMixClip, DuckSettings, FfmpegCliError, RgbaFrame,
     VideoEncoder, VideoReader,
 };
 
@@ -26,7 +28,7 @@ pub enum MediaError {
     Io(#[from] std::io::Error),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProbedMedia {
     pub kind: Option<MediaKind>,
     pub duration_secs: Option<f64>,

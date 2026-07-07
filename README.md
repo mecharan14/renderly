@@ -16,10 +16,11 @@ Not affiliated with, endorsed by, or a clone of any existing commercial editor.
 
 ## Status
 
-**Early / pre-alpha.** The engine's project schema and command API are tested; the CLI can
-build a timeline end to end and **export a cuts-only edit to MP4** (FFmpeg decode → wgpu
-composite → H.264 encode). Auto-captions, audio mixing, MCP, and the GUI are not built yet
-— see the roadmap below.
+**Early / pre-alpha — Phase 1 complete.** CLI and MCP drive the full command API end to end.
+Export renders video with burned-in captions, mixed audio (fades + music ducking), and
+supports Whisper auto-captions, Piper/OpenAI voiceover, and perception tools (frame preview,
+transcript, silence/scene detection, waveform peaks). Requires FFmpeg on PATH; optional
+Whisper, Piper, or OpenAI key for AI features. GUI is Phase 2.
 
 Read [PLAN.md](PLAN.md) for the full vision, tech stack rationale, and phased roadmap
 before contributing or building on this.
@@ -53,13 +54,10 @@ Windows first, macOS/Linux to follow. AGPL-3.0.
 
 ## Roadmap
 
-- **Phase 0 (current)** — workspace skeleton, project schema v0, command API, CLI, and the
-  media spine (FFmpeg subprocess decode → wgpu composite → encode). Milestone reached for
-  cuts-only video export; audio muxing and linked libav I/O come next.
-- **Phase 1** — headless AI editing: auto-captions, AI voiceover, audio mixing, MCP server.
-  Milestone: hand Claude Code a script and a folder of gameplay recordings and get a
-  finished video back with no GUI involved.
-- **Phase 2** — GUI MVP: timeline, native preview, direct manipulation, export dialog.
+- **Phase 0** — done: schema, commands, CLI export spine (FFmpeg → wgpu → H.264).
+- **Phase 1** — done: MCP server, Whisper captions, TTS voiceover, audio fades/ducking,
+  perception tools (silence, scenes, peaks, frame render, transcript).
+- **Phase 2 (current)** — GUI MVP: timeline, native preview, direct manipulation, export dialog.
 - **Phase 3** — effects, transitions, keyframes, the WASM plugin SDK and asset pack format.
 - **Phase 4** — community-driven feature parity march (background removal, motion tracking,
   templates, and more), mostly landing as plugins rather than core code.
@@ -86,6 +84,16 @@ cargo run -p uppercut-cli -- export demo.uppercut.json out.mp4 --preset tiktok
 
 Export requires `ffmpeg` and `ffprobe` on PATH (used as subprocesses in Phase 0; linked
 `ffmpeg-the-third` is planned once vcpkg/FFMPEG_DIR is wired for all environments).
+
+### MCP (AI agents)
+
+```sh
+cargo run -p uppercut-mcp
+```
+
+See [docs/mcp-agent-guide.md](docs/mcp-agent-guide.md) for tool list and a script-to-export workflow.
+Set `UPPERCUT_WHISPER_MODEL` for auto-captions, `UPPERCUT_PIPER_MODEL` for local TTS, or
+`OPENAI_API_KEY` for OpenAI voiceover.
 
 ## Contributing
 

@@ -49,6 +49,13 @@ pub struct Settings {
     pub width: u32,
     pub height: u32,
     pub sample_rate: u32,
+    /// Music ducking under voice/dialog tracks during export (dB). Default -12; set to 0 to disable.
+    #[serde(default = "default_duck_db")]
+    pub duck_db: f64,
+}
+
+fn default_duck_db() -> f64 {
+    -12.0
 }
 
 impl Default for Settings {
@@ -59,6 +66,7 @@ impl Default for Settings {
             width: 1080,
             height: 1920,
             sample_rate: 48000,
+            duck_db: default_duck_db(),
         }
     }
 }
@@ -98,6 +106,18 @@ pub struct Track {
     pub kind: TrackKind,
     pub name: String,
     pub clips: Vec<Clip>,
+    /// Mix role for audio ducking (Phase 1). Only meaningful on audio tracks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_role: Option<TrackAudioRole>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackAudioRole {
+    Voiceover,
+    Dialog,
+    Music,
+    Ambience,
 }
 
 impl Track {
@@ -107,6 +127,7 @@ impl Track {
             kind,
             name: name.into(),
             clips: Vec::new(),
+            audio_role: None,
         }
     }
 
@@ -159,6 +180,28 @@ pub struct MediaClip {
     pub source_out_secs: f64,
     pub gain_db: f64,
     pub enabled: bool,
+    /// Fade-in duration at the clip start (audio export, Phase 1).
+    #[serde(default)]
+    pub fade_in_secs: f64,
+    /// Fade-out duration at the clip end (audio export, Phase 1).
+    #[serde(default)]
+    pub fade_out_secs: f64,
+}
+
+impl Default for MediaClip {
+    fn default() -> Self {
+        Self {
+            id: Id::new_v4(),
+            media_id: Id::new_v4(),
+            position_secs: 0.0,
+            source_in_secs: 0.0,
+            source_out_secs: 0.0,
+            gain_db: 0.0,
+            enabled: true,
+            fade_in_secs: 0.0,
+            fade_out_secs: 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

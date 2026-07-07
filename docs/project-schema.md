@@ -19,7 +19,8 @@ extension `.uppercut.json`.
     "fps": 60.0,
     "width": 1080,
     "height": 1920,
-    "sample_rate": 48000
+    "sample_rate": 48000,
+    "duck_db": -12.0
   },
   "media": [ /* MediaItem[] */ ],
   "tracks": [ /* Track[] */ ]
@@ -34,6 +35,7 @@ extension `.uppercut.json`.
 | `settings.fps` | f64 | Timeline/output frame rate. |
 | `settings.width`, `settings.height` | u32 | Output resolution in pixels (e.g. 1080×1920 for TikTok). |
 | `settings.sample_rate` | u32 | Audio sample rate in Hz (e.g. 48000). |
+| `settings.duck_db` | f64 | Music ducking under voice/dialog during export (dB). Default −12; `0` disables ducking. |
 | `media` | MediaItem[] | Pool of imported source files, referenced by id from clips. |
 | `tracks` | Track[] | Ordered list, index = stacking/mix order (video: top track drawn last/on top; audio: all tracks mixed; captions: rendered above video). |
 
@@ -69,6 +71,7 @@ need bounds against media duration (e.g. `AddClip`) skip that validation when th
   "id": "track-uuid",
   "kind": "video",             // "video" | "audio" | "caption"
   "name": "Gameplay A",
+  "audio_role": "music",       // optional on audio tracks: voiceover | dialog | music | ambience
   "clips": [ /* Clip[], see below — shape depends on track kind */ ]
 }
 ```
@@ -94,6 +97,8 @@ serialized with `#[serde(tag = "type")]`.)
   "source_in_secs": 3.5,        // in-point within the source media
   "source_out_secs": 9.0,       // out-point within the source media
   "gain_db": 0.0,               // audio-only; present but ignored (0.0) for video-only clips with no embedded audio use
+  "fade_in_secs": 0.0,          // audio export fade-in (Phase 1)
+  "fade_out_secs": 0.0,         // audio export fade-out (Phase 1)
   "enabled": true                // soft-disable without deleting
 }
 ```
@@ -130,3 +135,5 @@ together with the code.
 
 - **v0** (Phase 0): initial shape above — media pool, video/audio/caption tracks,
   line-level captions, no effects/transitions/keyframes.
+- **v0 + Phase 1** (non-breaking): `Track.audio_role`, `MediaClip.fade_in_secs` /
+  `fade_out_secs`, `Settings.duck_db`.

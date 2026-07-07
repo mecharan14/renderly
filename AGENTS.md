@@ -86,11 +86,11 @@ Before considering a change complete:
 
 ## 4. Current phase
 
-Check PLAN.md §4 for the phase roadmap. Phase 0's core milestone — **CLI renders a
-cuts-only timeline JSON to MP4** — is implemented via `Export` (FFmpeg decode → wgpu
-composite → H.264 encode). Remaining Phase 0 polish: linked libav, audio muxing in export,
-and OTIO hooks. Do not jump ahead to GUI or plugin work until those land or are explicitly
-deprioritized.
+Check PLAN.md §4 for the phase roadmap. **Phase 1 is complete:** MCP server v1, Whisper
+auto-captions, caption burn-in, multi-track audio mix with fades and music ducking, TTS
+voiceover (`GenerateVoiceover`), and perception tools (transcript, frame render, silence,
+scenes, audio peaks). Do not jump to GUI (Phase 2) until you have a concrete GUI milestone
+from PLAN.md §4.
 
 ## 5. When in doubt
 

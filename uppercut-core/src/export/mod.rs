@@ -1,9 +1,13 @@
-//! Timeline → decode → wgpu composite → encode export pipeline (Phase 0 milestone).
+//! Timeline → decode → wgpu composite → encode export pipeline.
 
+use crate::captions::{render_caption, CaptionError};
 use crate::commands::ExportPreset;
 use crate::compose::{ComposeError, Compositor};
-use crate::media::{FfmpegCliError, RgbaFrame, VideoEncoder, VideoReader};
-use crate::project::{Clip, MediaKind, Project, TrackKind};
+use crate::media::{
+    mix_timeline_audio, mux_video_audio, AudioMixClip, DuckSettings, FfmpegCliError, RgbaFrame,
+    VideoEncoder, VideoReader,
+};
+use crate::project::{Clip, MediaKind, Project, TrackAudioRole, TrackKind};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -14,6 +18,8 @@ pub enum ExportError {
     Ffmpeg(#[from] FfmpegCliError),
     #[error("{0}")]
     Compose(#[from] ComposeError),
+    #[error("{0}")]
+    Caption(#[from] CaptionError),
     #[error("no enabled video clips on the timeline")]
     EmptyTimeline,
     #[error("media not found: {0}")]
@@ -57,6 +63,11 @@ struct ActiveLayer {
     source_time: f64,
 }
 
+struct ActiveCaption {
+    text: String,
+    style_id: String,
+}
+
 struct DecoderState {
     path: PathBuf,
     reader: Option<VideoReader>,
@@ -88,7 +99,42 @@ impl DecoderState {
     }
 }
 
-/// Render the project's video tracks to an MP4 file.
+/// Render one composited RGBA frame at `time_secs` (video + burned-in captions).
+pub fn render_frame_at(
+    project: &Project,
+    time_secs: f64,
+    settings: ExportSettings,
+) -> Result<Vec<u8>, ExportError> {
+    let layers = active_layers(project, time_secs)?;
+    let mut rgba_layers = Vec::new();
+
+    // Video layers decoded on demand — use a local decoder map per call.
+    let mut decoders: HashMap<uuid::Uuid, DecoderState> = HashMap::new();
+    for layer in &layers {
+        let decoder = decoders
+            .entry(layer.media_id)
+            .or_insert_with(|| DecoderState::new(layer.path.clone()));
+        if let Some(frame) = decoder.frame_at(layer.source_time)? {
+            rgba_layers.push(frame);
+        }
+    }
+
+    for cap in active_captions(project, time_secs) {
+        rgba_layers.push(render_caption(
+            &cap.text,
+            &cap.style_id,
+            settings.width,
+            settings.height,
+        )?);
+    }
+
+    let mut compositor = Compositor::new(settings.width, settings.height)?;
+    compositor
+        .composite(&rgba_layers)
+        .map_err(ExportError::from)
+}
+
+/// Render the project's timeline to an MP4 file (video + captions + mixed audio).
 pub fn export_project(
     project: &Project,
     output_path: &Path,
@@ -113,33 +159,121 @@ pub fn export_project(
         return Err(ExportError::EmptyTimeline);
     }
 
+    let temp_dir = std::env::temp_dir().join(format!("uppercut-export-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).map_err(FfmpegCliError::Io)?;
+    let temp_video = temp_dir.join("video.mp4");
+
     let mut compositor = Compositor::new(settings.width, settings.height)?;
     let mut encoder =
-        VideoEncoder::open(output_path, settings.width, settings.height, settings.fps)?;
-
+        VideoEncoder::open(&temp_video, settings.width, settings.height, settings.fps)?;
     let mut decoders: HashMap<uuid::Uuid, DecoderState> = HashMap::new();
 
     for frame_idx in 0..total_frames {
         let t = frame_idx as f64 / settings.fps;
         let layers = active_layers(project, t)?;
 
-        let mut rgba_layers = Vec::with_capacity(layers.len());
+        let mut rgba_layers = Vec::with_capacity(layers.len() + 2);
         for layer in &layers {
             let decoder = decoders
                 .entry(layer.media_id)
                 .or_insert_with(|| DecoderState::new(layer.path.clone()));
-
             if let Some(frame) = decoder.frame_at(layer.source_time)? {
                 rgba_layers.push(frame);
             }
+        }
+        for cap in active_captions(project, t) {
+            rgba_layers.push(render_caption(
+                &cap.text,
+                &cap.style_id,
+                settings.width,
+                settings.height,
+            )?);
         }
 
         let pixels = compositor.composite(&rgba_layers)?;
         encoder.write_frame(&pixels)?;
     }
-
     encoder.finish()?;
+
+    let audio_clips = collect_audio_clips(project);
+    if audio_clips.is_empty() {
+        std::fs::rename(&temp_video, output_path).or_else(|_| {
+            std::fs::copy(&temp_video, output_path).map_err(FfmpegCliError::Io)?;
+            Ok::<(), FfmpegCliError>(())
+        })?;
+    } else {
+        let temp_audio = temp_dir.join("audio.wav");
+        let duck = duck_settings(project);
+        mix_timeline_audio(
+            &audio_clips,
+            project.settings.sample_rate,
+            duration_secs,
+            &temp_audio,
+            duck,
+        )?;
+        mux_video_audio(&temp_video, &temp_audio, output_path)?;
+    }
+
+    std::fs::remove_dir_all(&temp_dir).ok();
     Ok(())
+}
+
+fn collect_audio_clips(project: &Project) -> Vec<AudioMixClip> {
+    let mut clips = Vec::new();
+    for track in &project.tracks {
+        if track.kind != TrackKind::Audio {
+            continue;
+        }
+        for clip in &track.clips {
+            let Clip::Audio(a) = clip else { continue };
+            if !a.enabled {
+                continue;
+            }
+            if let Some(media) = project.find_media(a.media_id) {
+                clips.push(AudioMixClip {
+                    path: media.path.clone(),
+                    position_secs: a.position_secs,
+                    source_in_secs: a.source_in_secs,
+                    source_out_secs: a.source_out_secs,
+                    gain_db: a.gain_db,
+                    fade_in_secs: a.fade_in_secs,
+                    fade_out_secs: a.fade_out_secs,
+                    role: track.audio_role,
+                });
+            }
+        }
+    }
+    clips
+}
+
+fn duck_settings(project: &Project) -> Option<DuckSettings> {
+    if project.settings.duck_db >= 0.0 {
+        return None;
+    }
+    let has_voice = project.tracks.iter().any(|t| {
+        t.kind == TrackKind::Audio
+            && matches!(
+                t.audio_role,
+                Some(TrackAudioRole::Voiceover) | Some(TrackAudioRole::Dialog)
+            )
+            && t.clips
+                .iter()
+                .any(|c| matches!(c, Clip::Audio(a) if a.enabled))
+    });
+    let has_music = project.tracks.iter().any(|t| {
+        t.kind == TrackKind::Audio
+            && t.audio_role == Some(TrackAudioRole::Music)
+            && t.clips
+                .iter()
+                .any(|c| matches!(c, Clip::Audio(a) if a.enabled))
+    });
+    if has_voice && has_music {
+        Some(DuckSettings {
+            duck_db: project.settings.duck_db,
+        })
+    } else {
+        None
+    }
 }
 
 fn has_video_content(project: &Project) -> bool {
@@ -152,7 +286,7 @@ fn has_video_content(project: &Project) -> bool {
     })
 }
 
-fn timeline_duration(project: &Project) -> f64 {
+pub fn timeline_duration(project: &Project) -> f64 {
     project
         .tracks
         .iter()
@@ -188,12 +322,32 @@ fn active_layers(project: &Project, t: f64) -> Result<Vec<ActiveLayer>, ExportEr
                     path: media.path.clone(),
                     source_time,
                 });
-                break; // at most one clip per track at time t
+                break;
             }
         }
     }
 
     Ok(layers)
+}
+
+fn active_captions(project: &Project, t: f64) -> Vec<ActiveCaption> {
+    let mut caps = Vec::new();
+    for track in &project.tracks {
+        if track.kind != TrackKind::Caption {
+            continue;
+        }
+        for clip in &track.clips {
+            let Clip::Caption(c) = clip else { continue };
+            let end = c.position_secs + c.duration_secs;
+            if t >= c.position_secs && t < end {
+                caps.push(ActiveCaption {
+                    text: c.text.clone(),
+                    style_id: c.style_id.clone(),
+                });
+            }
+        }
+    }
+    caps
 }
 
 #[cfg(test)]
@@ -264,6 +418,8 @@ mod tests {
                 source_out_secs: 0.5,
                 gain_db: 0.0,
                 enabled: true,
+                fade_in_secs: 0.0,
+                fade_out_secs: 0.0,
             }));
 
         export_project(
@@ -299,6 +455,8 @@ mod tests {
                 source_out_secs: 2.0,
                 gain_db: 0.0,
                 enabled: true,
+                fade_in_secs: 0.0,
+                fade_out_secs: 0.0,
             }));
         assert!((timeline_duration(&project) - 3.0).abs() < 1e-9);
     }

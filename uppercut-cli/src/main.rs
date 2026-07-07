@@ -101,6 +101,7 @@ fn main() -> Result<()> {
                     width,
                     height,
                     sample_rate,
+                    duck_db: -12.0,
                 },
             );
             save_project(&path, &project)?;

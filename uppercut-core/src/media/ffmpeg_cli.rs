@@ -3,6 +3,8 @@
 //! lands once vcpkg/FFMPEG_DIR is wired up for all dev/CI environments.
 
 use std::io::{BufReader, Read, Write};
+
+use crate::project::TrackAudioRole;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
@@ -323,4 +325,262 @@ impl VideoEncoder {
         }
         Ok(())
     }
+}
+
+/// Mux a video-only MP4 with a WAV/MP4 audio track.
+pub fn mux_video_audio(
+    video_path: &Path,
+    audio_path: &Path,
+    output_path: &Path,
+) -> Result<(), FfmpegCliError> {
+    let status = Command::new(ffmpeg_path()?)
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(video_path)
+        .args(["-i"])
+        .arg(audio_path)
+        .args([
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+        ])
+        .arg(output_path)
+        .status()
+        .map_err(|e| FfmpegCliError::SpawnFailed {
+            tool: "ffmpeg",
+            message: e.to_string(),
+        })?;
+    if !status.success() {
+        return Err(FfmpegCliError::NonZeroExit(status.code().unwrap_or(-1)));
+    }
+    Ok(())
+}
+
+/// Sidechain ducking applied when voice and music buses are both present.
+#[derive(Debug, Clone, Copy)]
+pub struct DuckSettings {
+    pub duck_db: f64,
+}
+
+/// Mix enabled audio clips onto a timeline-length WAV file.
+pub fn mix_timeline_audio(
+    clips: &[AudioMixClip],
+    sample_rate: u32,
+    duration_secs: f64,
+    output_wav: &Path,
+    duck: Option<DuckSettings>,
+) -> Result<(), FfmpegCliError> {
+    if clips.is_empty() {
+        return Err(FfmpegCliError::BadOutput("no audio clips".into()));
+    }
+
+    if let Some(duck_cfg) = duck {
+        let (voice, music, other) = partition_clips(clips);
+        if !voice.is_empty() && !music.is_empty() {
+            let temp_dir =
+                std::env::temp_dir().join(format!("uppercut-audio-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&temp_dir).map_err(FfmpegCliError::Io)?;
+
+            let voice_wav = temp_dir.join("voice.wav");
+            let music_wav = temp_dir.join("music.wav");
+            let ducked_wav = temp_dir.join("ducked_music.wav");
+
+            let voice_clips: Vec<AudioMixClip> = voice.into_iter().cloned().collect();
+            let music_clips: Vec<AudioMixClip> = music.into_iter().cloned().collect();
+            mix_clip_bus(&voice_clips, sample_rate, duration_secs, &voice_wav)?;
+            mix_clip_bus(&music_clips, sample_rate, duration_secs, &music_wav)?;
+
+            let makeup = db_to_linear(-duck_cfg.duck_db);
+            let filter = format!(
+                "[0:a][1:a]sidechaincompress=threshold=0.02:ratio=8:attack=200:release=1000,volume={makeup:.6}[out]"
+            );
+            let status = Command::new(ffmpeg_path()?)
+                .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+                .arg(&music_wav)
+                .args(["-i"])
+                .arg(&voice_wav)
+                .args(["-filter_complex", &filter, "-map", "[out]"])
+                .arg(&ducked_wav)
+                .status()
+                .map_err(|e| FfmpegCliError::SpawnFailed {
+                    tool: "ffmpeg",
+                    message: e.to_string(),
+                })?;
+            if !status.success() {
+                std::fs::remove_dir_all(&temp_dir).ok();
+                return Err(FfmpegCliError::NonZeroExit(status.code().unwrap_or(-1)));
+            }
+
+            let mut final_clips = Vec::new();
+            final_clips.push(AudioMixClip {
+                path: voice_wav.clone(),
+                position_secs: 0.0,
+                source_in_secs: 0.0,
+                source_out_secs: duration_secs,
+                gain_db: 0.0,
+                fade_in_secs: 0.0,
+                fade_out_secs: 0.0,
+                role: None,
+            });
+            final_clips.push(AudioMixClip {
+                path: ducked_wav.clone(),
+                position_secs: 0.0,
+                source_in_secs: 0.0,
+                source_out_secs: duration_secs,
+                gain_db: 0.0,
+                fade_in_secs: 0.0,
+                fade_out_secs: 0.0,
+                role: None,
+            });
+            for c in other {
+                final_clips.push(c.clone());
+            }
+
+            let result = mix_clip_bus(&final_clips, sample_rate, duration_secs, output_wav);
+            std::fs::remove_dir_all(&temp_dir).ok();
+            return result;
+        }
+    }
+
+    mix_clip_bus(clips, sample_rate, duration_secs, output_wav)
+}
+
+fn mix_clip_bus(
+    clips: &[AudioMixClip],
+    sample_rate: u32,
+    duration_secs: f64,
+    output_wav: &Path,
+) -> Result<(), FfmpegCliError> {
+    if clips.is_empty() {
+        return Err(FfmpegCliError::BadOutput("no audio clips".into()));
+    }
+
+    let temp_dir = std::env::temp_dir().join(format!("uppercut-audio-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).map_err(FfmpegCliError::Io)?;
+
+    let mut segment_paths = Vec::new();
+    let mut filter_parts = Vec::new();
+
+    for (i, clip) in clips.iter().enumerate() {
+        let seg = temp_dir.join(format!("seg_{i}.wav"));
+        let seg_duration = clip.source_out_secs - clip.source_in_secs;
+        let af = build_audio_filter(clip, seg_duration);
+
+        let status = Command::new(ffmpeg_path()?)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-ss",
+                &format!("{:.6}", clip.source_in_secs),
+                "-i",
+            ])
+            .arg(&clip.path)
+            .args([
+                "-t",
+                &format!("{seg_duration:.6}"),
+                "-af",
+                &af,
+                "-ar",
+                &sample_rate.to_string(),
+                "-ac",
+                "2",
+            ])
+            .arg(&seg)
+            .status()
+            .map_err(|e| FfmpegCliError::SpawnFailed {
+                tool: "ffmpeg",
+                message: e.to_string(),
+            })?;
+        if !status.success() {
+            std::fs::remove_dir_all(&temp_dir).ok();
+            return Err(FfmpegCliError::NonZeroExit(status.code().unwrap_or(-1)));
+        }
+        segment_paths.push(seg);
+
+        let delay_ms = (clip.position_secs * 1000.0).round() as u64;
+        filter_parts.push(format!("[{i}:a]adelay={delay_ms}|{delay_ms}[a{i}]"));
+    }
+
+    let n = clips.len();
+    let mix_labels = (0..n).map(|i| format!("[a{i}]")).collect::<String>();
+    let filter = format!(
+        "{};{}amix=inputs={n}:duration=longest:dropout_transition=0,apad=whole_dur={duration_secs:.6}[out]",
+        filter_parts.join(";"),
+        mix_labels,
+    );
+
+    let mut cmd = Command::new(ffmpeg_path()?);
+    cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
+    for seg in &segment_paths {
+        cmd.args(["-i"]).arg(seg);
+    }
+    cmd.args(["-filter_complex", &filter, "-map", "[out]", "-ar"])
+        .arg(sample_rate.to_string())
+        .args(["-ac", "2"])
+        .arg(output_wav);
+
+    let status = cmd.status().map_err(|e| FfmpegCliError::SpawnFailed {
+        tool: "ffmpeg",
+        message: e.to_string(),
+    })?;
+    std::fs::remove_dir_all(&temp_dir).ok();
+    if !status.success() {
+        return Err(FfmpegCliError::NonZeroExit(status.code().unwrap_or(-1)));
+    }
+    Ok(())
+}
+
+fn build_audio_filter(clip: &AudioMixClip, seg_duration: f64) -> String {
+    let volume = db_to_linear(clip.gain_db);
+    let mut parts = vec![format!("volume={volume:.6}")];
+    if clip.fade_in_secs > 0.0 {
+        parts.push(format!("afade=t=in:st=0:d={:.6}", clip.fade_in_secs));
+    }
+    if clip.fade_out_secs > 0.0 {
+        let st = (seg_duration - clip.fade_out_secs).max(0.0);
+        parts.push(format!(
+            "afade=t=out:st={st:.6}:d={:.6}",
+            clip.fade_out_secs
+        ));
+    }
+    parts.join(",")
+}
+
+fn partition_clips(
+    clips: &[AudioMixClip],
+) -> (Vec<&AudioMixClip>, Vec<&AudioMixClip>, Vec<&AudioMixClip>) {
+    let mut voice = Vec::new();
+    let mut music = Vec::new();
+    let mut other = Vec::new();
+    for c in clips {
+        match c.role {
+            Some(TrackAudioRole::Voiceover) | Some(TrackAudioRole::Dialog) => voice.push(c),
+            Some(TrackAudioRole::Music) => music.push(c),
+            _ => other.push(c),
+        }
+    }
+    (voice, music, other)
+}
+
+fn db_to_linear(gain_db: f64) -> f64 {
+    10_f64.powf(gain_db / 20.0)
+}
+
+#[derive(Debug, Clone)]
+pub struct AudioMixClip {
+    pub path: PathBuf,
+    pub position_secs: f64,
+    pub source_in_secs: f64,
+    pub source_out_secs: f64,
+    pub gain_db: f64,
+    pub fade_in_secs: f64,
+    pub fade_out_secs: f64,
+    pub role: Option<TrackAudioRole>,
 }

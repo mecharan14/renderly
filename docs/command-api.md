@@ -1,6 +1,6 @@
 # Command API — v0
 
-Status: **spec for Phase 0**. This is the source of truth for the `Command` enum and
+Status: **Phase 1 complete**. This is the source of truth for the `Command` enum and
 `apply_command` in `uppercut-core`. GUI, CLI, and MCP must all dispatch through this exact
 set (see AGENTS.md §0.1) — none of them may mutate `Project` state any other way.
 
@@ -17,6 +17,10 @@ pub enum Command {
     DeleteClip { track_id: Id, clip_id: Id, ripple: bool },
     AddCaption { track_id: Id, text: String, position_secs: f64, duration_secs: f64, style_id: String },
     SetAudioGain { track_id: Id, clip_id: Id, gain_db: f64 },
+    GenerateCaptions { media_id: Id, track_id: Id, style_id: String, timeline_offset_secs: f64 },
+    GenerateVoiceover { text: String, track_id: Id, position_secs: f64, output_path: String, provider: VoiceoverProvider },
+    SetAudioFade { track_id: Id, clip_id: Id, fade_in_secs: f64, fade_out_secs: f64 },
+    SetTrackAudioRole { track_id: Id, role: Option<TrackAudioRole> },
     Export { output_path: String, preset: ExportPreset },
 }
 
@@ -24,9 +28,8 @@ pub fn apply_command(project: &mut Project, cmd: Command) -> Result<CommandOutco
 ```
 
 `CommandOutcome` carries whatever the caller needs back (e.g. `ImportMedia` returns the new
-`media_id`; edit commands return `Ok(CommandOutcome::Applied)`; `Export` returns a handle to
-track render progress — exact shape TBD when the render pipeline exists, don't over-specify
-ahead of Phase 0's spike).
+`media_id`; edit commands return `Ok(CommandOutcome::Applied)`; `GenerateVoiceover` returns
+`media_id` and `clip_id`; `Export` drives the render pipeline).
 
 Every command except `Export` is a pure mutation of `Project` and must be representable in
 the project's command log for undo/redo (Phase 2+ feature; v0 just needs the enum to be
@@ -95,12 +98,47 @@ once that's modeled — v0 audio gain applies to `AudioClip` only).
 
 - Errors: clip not found, or clip type has no audio.
 
+### `GenerateCaptions` (Phase 1)
+Runs local Whisper STT on `media_id` (video or audio) and adds one `CaptionClip` per
+transcript segment to `track_id` (must be a caption track). Segments are placed at
+`timeline_offset_secs + segment.start_secs` with duration `segment.end - segment.start`.
+Uses `style_id` for export burn-in (built-in: `tiktok-bold-yellow`, `tiktok-minimal`,
+`tiktok-box`, `youtube-lower-thirds`).
+
+Requires `whisper-cli` (or `whisper`) on PATH and `UPPERCUT_WHISPER_MODEL` pointing at a
+ggml model file.
+
+- Errors: track/media not found, track kind mismatch, caption overlap, Whisper unavailable.
+
+### `GenerateVoiceover` (Phase 1)
+Synthesizes narration from `text` using `provider` and writes WAV to `output_path`, then
+imports it and places a clip on `track_id` at `position_secs`. Returns `VoiceoverGenerated`
+with `media_id` and `clip_id`.
+
+`VoiceoverProvider` variants (JSON tag `provider`):
+
+- `piper_local` — local Piper ONNX via `piper` CLI; requires `UPPERCUT_PIPER_MODEL`.
+- `open_ai` — OpenAI TTS (`tts-1`); requires `OPENAI_API_KEY` (BYO, opt-in).
+
+- Errors: track not found or not audio, TTS unavailable, overlap, probe/import failure.
+
+### `SetAudioFade` (Phase 1)
+Sets `fade_in_secs` and `fade_out_secs` on an audio clip. Applied during export via FFmpeg
+`afade`.
+
+- Errors: clip not found, not audio, negative fade durations.
+
+### `SetTrackAudioRole` (Phase 1)
+Sets `audio_role` on an audio track: `voiceover`, `dialog`, `music`, or `ambience`. Pass
+`null` for `role` to clear. When a voice/dialog track and a music track are both present,
+export applies sidechain ducking using `settings.duck_db` (default −12 dB).
+
+- Errors: track not found, track is not audio.
+
 ### `Export`
 Renders the current `Project` timeline to `output_path` using `preset` (e.g.
-`TikTok9x16`, `Youtube16x9`, or a `Custom { width, height, fps }` variant). This is the one
-command with a side effect beyond mutating `Project` in memory — it drives the media/compose
-pipeline. Exact `ExportPreset` variants and progress-reporting shape are finalized during
-the Phase 0 media-spine spike; treat what's above as intent, not final signature.
+`TikTok9x16`, `Youtube16x9`, or a `Custom { width, height, fps }` variant). Muxes mixed
+audio (with fades and optional music ducking) and burns caption clips.
 
 ## Non-goals for v0
 
@@ -111,4 +149,6 @@ a command for a feature that has no schema representation yet.
 
 ## Version history
 
-- **v0** (Phase 0): the 10 commands above, matching project schema v0.
+- **v0** (Phase 0): the initial 10 commands, matching project schema v0.
+- **v0 + Phase 1** (non-breaking): added `GenerateCaptions`, `GenerateVoiceover`,
+  `SetAudioFade`, `SetTrackAudioRole`; export muxes audio with fades/ducking and burns captions.

@@ -1,8 +1,9 @@
 //! Command API v0 — matches docs/command-api.md exactly. This is the *only* sanctioned way
 //! to mutate a `Project` (see AGENTS.md §0.1). GUI, CLI, and MCP all dispatch here.
 
+use crate::audio::{synthesize_to_wav, VoiceoverProvider};
 use crate::media::{self, MediaError};
-use crate::project::{CaptionClip, Clip, Id, MediaClip, Project, Track, TrackKind};
+use crate::project::{CaptionClip, Clip, Id, MediaClip, Project, Track, TrackAudioRole, TrackKind};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -61,6 +62,35 @@ pub enum Command {
         output_path: String,
         preset: ExportPreset,
     },
+    /// Run local Whisper STT on a media item and add caption clips to a caption track.
+    GenerateCaptions {
+        media_id: Id,
+        track_id: Id,
+        style_id: String,
+        /// Seconds added to each segment timestamp when placing on the timeline.
+        #[serde(default)]
+        timeline_offset_secs: f64,
+    },
+    /// Synthesize narration audio (Piper local or OpenAI BYO) and place on an audio track.
+    GenerateVoiceover {
+        text: String,
+        track_id: Id,
+        position_secs: f64,
+        output_path: String,
+        provider: VoiceoverProvider,
+    },
+    /// Set fade-in/out on an audio clip (applied during export).
+    SetAudioFade {
+        track_id: Id,
+        clip_id: Id,
+        fade_in_secs: f64,
+        fade_out_secs: f64,
+    },
+    /// Assign mix role on an audio track (voiceover/dialog/music/ambience) for ducking.
+    SetTrackAudioRole {
+        track_id: Id,
+        role: Option<TrackAudioRole>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +107,8 @@ pub enum CommandOutcome {
     TrackAdded { track_id: Id },
     ClipAdded { clip_id: Id },
     ClipSplit { left_id: Id, right_id: Id },
+    CaptionsGenerated { count: usize },
+    VoiceoverGenerated { media_id: Id, clip_id: Id },
     Applied,
 }
 
@@ -106,6 +138,12 @@ pub enum CommandError {
     Media(#[from] MediaError),
     #[error("{0}")]
     Export(#[from] crate::export::ExportError),
+    #[error("{0}")]
+    Perceive(#[from] crate::perceive::PerceiveError),
+    #[error("{0}")]
+    Tts(#[from] crate::audio::TtsError),
+    #[error("invalid fade: fade durations must be >= 0")]
+    InvalidFade,
     #[error("not yet implemented: {0}")]
     NotImplemented(&'static str),
 }
@@ -179,6 +217,35 @@ pub fn apply_command(project: &mut Project, cmd: Command) -> Result<CommandOutco
             output_path,
             preset,
         } => export_project_cmd(project, &output_path, preset),
+        Command::GenerateCaptions {
+            media_id,
+            track_id,
+            style_id,
+            timeline_offset_secs,
+        } => generate_captions(project, media_id, track_id, style_id, timeline_offset_secs),
+        Command::GenerateVoiceover {
+            text,
+            track_id,
+            position_secs,
+            output_path,
+            provider,
+        } => generate_voiceover(
+            project,
+            &text,
+            track_id,
+            position_secs,
+            &output_path,
+            provider,
+        ),
+        Command::SetAudioFade {
+            track_id,
+            clip_id,
+            fade_in_secs,
+            fade_out_secs,
+        } => set_audio_fade(project, track_id, clip_id, fade_in_secs, fade_out_secs),
+        Command::SetTrackAudioRole { track_id, role } => {
+            set_track_audio_role(project, track_id, role)
+        }
     }
 }
 
@@ -294,6 +361,8 @@ fn add_clip(
         source_out_secs,
         gain_db: 0.0,
         enabled: true,
+        fade_in_secs: 0.0,
+        fade_out_secs: 0.0,
     };
     let clip = match track.kind {
         TrackKind::Video => Clip::Video(media_clip),
@@ -542,6 +611,55 @@ fn export_project_cmd(
     Ok(CommandOutcome::Applied)
 }
 
+fn generate_captions(
+    project: &mut Project,
+    media_id: Id,
+    track_id: Id,
+    style_id: String,
+    timeline_offset_secs: f64,
+) -> Result<CommandOutcome, CommandError> {
+    use crate::captions::BUILTIN_STYLES;
+    use crate::perceive::transcribe_media;
+
+    if !BUILTIN_STYLES.contains(&style_id.as_str()) {
+        // Allow any style id but warn via default fallback in renderer — still accept custom ids.
+    }
+
+    let track = project
+        .find_track(track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    if track.kind != TrackKind::Caption {
+        return Err(CommandError::TrackKindMismatch(
+            track_id,
+            track.kind,
+            TrackKind::Caption,
+        ));
+    }
+
+    let transcript = transcribe_media(project, media_id)?;
+    let mut count = 0usize;
+
+    for seg in transcript.segments {
+        let text = seg.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let duration = (seg.end_secs - seg.start_secs).max(0.1);
+        let position = timeline_offset_secs + seg.start_secs;
+        add_caption(
+            project,
+            track_id,
+            text.to_string(),
+            position,
+            duration,
+            style_id.clone(),
+        )?;
+        count += 1;
+    }
+
+    Ok(CommandOutcome::CaptionsGenerated { count })
+}
+
 fn set_audio_gain(
     project: &mut Project,
     track_id: Id,
@@ -564,6 +682,108 @@ fn set_audio_gain(
         }
         _ => Err(CommandError::NoAudio(clip_id)),
     }
+}
+
+fn set_audio_fade(
+    project: &mut Project,
+    track_id: Id,
+    clip_id: Id,
+    fade_in_secs: f64,
+    fade_out_secs: f64,
+) -> Result<CommandOutcome, CommandError> {
+    if fade_in_secs < 0.0 || fade_out_secs < 0.0 {
+        return Err(CommandError::InvalidFade);
+    }
+
+    let track = project
+        .find_track_mut(track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    let clip = track
+        .clips
+        .iter_mut()
+        .find(|c| c.id() == clip_id)
+        .ok_or(CommandError::ClipNotFound(clip_id, track_id))?;
+
+    match clip {
+        Clip::Audio(m) => {
+            m.fade_in_secs = fade_in_secs;
+            m.fade_out_secs = fade_out_secs;
+            Ok(CommandOutcome::Applied)
+        }
+        _ => Err(CommandError::NoAudio(clip_id)),
+    }
+}
+
+fn set_track_audio_role(
+    project: &mut Project,
+    track_id: Id,
+    role: Option<TrackAudioRole>,
+) -> Result<CommandOutcome, CommandError> {
+    let track = project
+        .find_track_mut(track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    if track.kind != TrackKind::Audio {
+        return Err(CommandError::TrackKindMismatch(
+            track_id,
+            track.kind,
+            TrackKind::Audio,
+        ));
+    }
+    track.audio_role = role;
+    Ok(CommandOutcome::Applied)
+}
+
+fn generate_voiceover(
+    project: &mut Project,
+    text: &str,
+    track_id: Id,
+    position_secs: f64,
+    output_path: &str,
+    provider: VoiceoverProvider,
+) -> Result<CommandOutcome, CommandError> {
+    use crate::project::MediaItem;
+    use std::path::PathBuf;
+
+    let track = project
+        .find_track(track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    if track.kind != TrackKind::Audio {
+        return Err(CommandError::TrackKindMismatch(
+            track_id,
+            track.kind,
+            TrackKind::Audio,
+        ));
+    }
+
+    let path_buf = PathBuf::from(output_path);
+    if let Some(parent) = path_buf.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(MediaError::Io)?;
+        }
+    }
+
+    synthesize_to_wav(text, &provider, &path_buf)?;
+
+    let probed = media::probe(&path_buf)?;
+    let duration = probed.duration_secs.unwrap_or(0.1).max(0.1);
+    let media_id = Id::new_v4();
+    project.media.push(MediaItem {
+        id: media_id,
+        path: path_buf,
+        kind: probed.kind.unwrap_or(crate::project::MediaKind::Audio),
+        duration_secs: Some(duration),
+        width: probed.width,
+        height: probed.height,
+        fps: probed.fps,
+    });
+
+    let outcome = add_clip(project, track_id, media_id, position_secs, 0.0, duration)?;
+    let clip_id = match outcome {
+        CommandOutcome::ClipAdded { clip_id } => clip_id,
+        _ => unreachable!(),
+    };
+
+    Ok(CommandOutcome::VoiceoverGenerated { media_id, clip_id })
 }
 
 #[cfg(test)]
@@ -858,6 +1078,138 @@ mod tests {
         )
         .unwrap_err();
 
+        assert!(matches!(err, CommandError::TrackKindMismatch(_, _, _)));
+    }
+
+    #[test]
+    fn generate_captions_requires_caption_track() {
+        let mut project = test_project();
+        let media_id = uuid::Uuid::new_v4();
+        project.media.push(crate::project::MediaItem {
+            id: media_id,
+            path: "x.wav".into(),
+            kind: crate::project::MediaKind::Audio,
+            duration_secs: Some(1.0),
+            width: None,
+            height: None,
+            fps: None,
+        });
+        let track_id = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Video,
+                name: "V1".into(),
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+
+        let err = apply_command(
+            &mut project,
+            Command::GenerateCaptions {
+                media_id,
+                track_id,
+                style_id: "tiktok-bold-yellow".into(),
+                timeline_offset_secs: 0.0,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::TrackKindMismatch(_, _, _)));
+    }
+
+    #[test]
+    fn set_audio_fade_on_audio_clip() {
+        let mut project = test_project();
+        let media_id = uuid::Uuid::new_v4();
+        project.media.push(crate::project::MediaItem {
+            id: media_id,
+            path: "voice.wav".into(),
+            kind: crate::project::MediaKind::Audio,
+            duration_secs: Some(5.0),
+            width: None,
+            height: None,
+            fps: None,
+        });
+        let track_id = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Audio,
+                name: "A1".into(),
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        let clip_id = match apply_command(
+            &mut project,
+            Command::AddClip {
+                track_id,
+                media_id,
+                position_secs: 0.0,
+                source_in_secs: 0.0,
+                source_out_secs: 5.0,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::ClipAdded { clip_id } => clip_id,
+            _ => unreachable!(),
+        };
+
+        apply_command(
+            &mut project,
+            Command::SetAudioFade {
+                track_id,
+                clip_id,
+                fade_in_secs: 0.5,
+                fade_out_secs: 1.0,
+            },
+        )
+        .unwrap();
+
+        let clip = project
+            .find_track(track_id)
+            .unwrap()
+            .find_clip(clip_id)
+            .unwrap();
+        match clip {
+            Clip::Audio(c) => {
+                assert!((c.fade_in_secs - 0.5).abs() < 1e-9);
+                assert!((c.fade_out_secs - 1.0).abs() < 1e-9);
+            }
+            _ => panic!("expected audio clip"),
+        }
+    }
+
+    #[test]
+    fn set_track_audio_role_requires_audio_track() {
+        let mut project = test_project();
+        let track_id = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Video,
+                name: "V1".into(),
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+
+        let err = apply_command(
+            &mut project,
+            Command::SetTrackAudioRole {
+                track_id,
+                role: Some(crate::project::TrackAudioRole::Music),
+            },
+        )
+        .unwrap_err();
         assert!(matches!(err, CommandError::TrackKindMismatch(_, _, _)));
     }
 
