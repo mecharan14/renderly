@@ -178,6 +178,8 @@ impl AppState {
 
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 fn native_window_from_app(app: &AppHandle) -> Result<NativeWindow, String> {
+    #[cfg(target_os = "linux")]
+    use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     let window = app
@@ -194,13 +196,28 @@ fn native_window_from_app(app: &AppHandle) -> Result<NativeWindow, String> {
             ns_view: h.ns_view.as_ptr() as usize,
         }),
         #[cfg(target_os = "linux")]
-        RawWindowHandle::Xlib(h) => Ok(NativeWindow {
+        RawWindowHandle::Xlib(h) => Ok(NativeWindow::X11 {
             display: h.display.as_ptr().cast(),
             window: h.window.get(),
         }),
         #[cfg(target_os = "linux")]
+        RawWindowHandle::Wayland(w) => {
+            let display = window
+                .display_handle()
+                .map_err(|e| format!("display handle: {e}"))?;
+            match display.as_raw() {
+                RawDisplayHandle::Wayland(d) => Ok(NativeWindow::Wayland {
+                    display: d.display.as_ptr().cast(),
+                    surface: w.surface.as_ptr().cast(),
+                }),
+                other => Err(format!(
+                    "Wayland window handle without Wayland display: {other:?}"
+                )),
+            }
+        }
+        #[cfg(target_os = "linux")]
         other => Err(format!(
-            "native preview requires X11 (Wayland not supported yet): {other:?}"
+            "native preview requires X11 or Wayland window handle: {other:?}"
         )),
         #[cfg(not(target_os = "linux"))]
         other => Err(format!("unsupported window handle: {other:?}")),

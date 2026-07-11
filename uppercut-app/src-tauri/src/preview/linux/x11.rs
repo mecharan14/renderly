@@ -1,5 +1,5 @@
-use super::gfx::GfxState;
-use super::{PreviewBounds, PreviewError};
+use super::super::gfx::GfxState;
+use super::super::{PreviewBounds, PreviewError};
 use raw_window_handle::{
     HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle, XlibDisplayHandle,
     XlibWindowHandle,
@@ -12,32 +12,27 @@ use x11::xlib::{
 };
 
 #[derive(Clone, Copy, Debug)]
-pub struct NativeWindow {
+pub struct Parent {
     pub display: *mut Display,
     pub window: u32,
 }
 
-pub struct PlatformPreview {
-    parent: Option<NativeWindow>,
+pub struct Preview {
+    parent: Parent,
     child: Option<u32>,
     gfx: Option<GfxState>,
 }
 
-impl PlatformPreview {
-    pub fn new() -> Self {
+impl Preview {
+    pub fn new(parent: Parent) -> Self {
         Self {
-            parent: None,
+            parent,
             child: None,
             gfx: None,
         }
     }
 
-    pub fn attach_parent(&mut self, parent: NativeWindow) {
-        self.parent = Some(parent);
-    }
-
     pub fn set_bounds(&mut self, bounds: PreviewBounds) -> Result<(), PreviewError> {
-        let parent = self.parent.ok_or(PreviewError::NotInitialized)?;
         if bounds.width == 0 || bounds.height == 0 {
             eprintln!(
                 "preview: set_bounds got a zero dimension ({}x{} at {},{}), skipping — \
@@ -49,7 +44,7 @@ impl PlatformPreview {
 
         let child = ensure_child_window(
             self.child,
-            parent,
+            self.parent,
             bounds.x,
             bounds.y,
             bounds.width,
@@ -58,7 +53,7 @@ impl PlatformPreview {
         self.child = Some(child);
 
         if self.gfx.is_none() {
-            match preview_gfx_state(parent.display, child, bounds.width, bounds.height) {
+            match preview_gfx_state(self.parent.display, child, bounds.width, bounds.height) {
                 Ok(gfx) => self.gfx = Some(gfx),
                 Err(e) => {
                     eprintln!("preview: GfxState::new failed: {e}");
@@ -69,7 +64,7 @@ impl PlatformPreview {
             if let Err(e) = gfx.resize(bounds.width, bounds.height) {
                 eprintln!("preview: resize failed ({e}), recreating GfxState");
                 self.gfx = Some(preview_gfx_state(
-                    parent.display,
+                    self.parent.display,
                     child,
                     bounds.width,
                     bounds.height,
@@ -138,7 +133,7 @@ impl HasDisplayHandle for X11WindowHandle {
 
 fn ensure_child_window(
     existing: Option<u32>,
-    parent: NativeWindow,
+    parent: Parent,
     x: i32,
     y: i32,
     width: u32,
@@ -190,12 +185,12 @@ fn set_click_through(display: *mut Display, window: u32) {
     }
 }
 
-impl Drop for PlatformPreview {
+impl Drop for Preview {
     fn drop(&mut self) {
-        if let (Some(parent), Some(child)) = (self.parent, self.child) {
+        if let Some(child) = self.child {
             unsafe {
-                XDestroyWindow(parent.display, child as Window);
-                XFlush(parent.display);
+                XDestroyWindow(self.parent.display, child as Window);
+                XFlush(self.parent.display);
             }
         }
     }

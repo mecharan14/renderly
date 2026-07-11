@@ -5,7 +5,8 @@ decode/encode with an offscreen wgpu compositor. Schema **v5** covers clip trans
 keyframes (incl. Speed) / builtins (incl. glitch) / ten WGSL transitions / clip speed,
 asset packs (LUTs, stickers, SFX), and a wasmtime frame+audio plugin host. See
 [asset-pack.md](asset-pack.md) and [plugin-api.md](plugin-api.md). Native preview is
-cross-platform (Win32 HWND, AppKit NSView, Linux/X11 child window; Wayland deferred).
+cross-platform (Win32 HWND, AppKit NSView, Linux X11 child window or Wayland
+`wl_subsurface`).
 CI runs on Windows/macOS/Linux. Manual QA: [qa-checklist.md](qa-checklist.md).
 
 ## Crate graph
@@ -98,15 +99,19 @@ Two rendering surfaces coexist in one window:
   lives in `styles/tokens.css` (charcoal surfaces, ember accent `#ff5a3d`, Source Sans 3)
   and `styles/globals.css`; UI glyphs are **lucide-react** (no emoji icons). Timeline
   canvas colors read the same CSS vars through `timeline/theme.ts`.
-- **Native preview surface** — a wgpu child native window (Win32 HWND, AppKit NSView, or
-  X11 child window) receiving composited frames from the playback engine in
-  `uppercut-core`. Never proxies frames through the webview/JS bridge. The surface is
-  click-through so overlay controls stay interactive. Preview bounds are synced from
-  `#preview-host`'s letterboxed content rect (`set_preview_bounds`) so they stay aligned
-  when the custom titlebar height changes. Transform and mask authoring use webview
-  overlays (`PreviewHandlesOverlay` / `PreviewMaskOverlay`) with ephemeral
+- **Native preview surface** — a wgpu child native window (Win32 HWND, AppKit NSView,
+  Linux X11 child window, or Wayland `wl_subsurface`) receiving composited frames from
+  the playback engine in `uppercut-core`. Never proxies frames through the webview/JS
+  bridge. The surface is click-through so overlay controls stay interactive (X11:
+  empty ShapeInput region; Wayland: empty `wl_region` input region). Preview bounds are
+  synced from `#preview-host`'s letterboxed content rect (`set_preview_bounds`) so they
+  stay aligned when the custom titlebar height changes. Transform and mask authoring use
+  webview overlays (`PreviewHandlesOverlay` / `PreviewMaskOverlay`) with ephemeral
   `preview_transform_override` / `preview_mask_override` during drag and a single
-  undoable command on mouseup. Linux/Wayland is not supported yet.
+  undoable command on mouseup. Linux selects X11 vs Wayland at runtime from the raw
+  window handle. Wayland caveat: subsurface position is parent-synchronized (applies on
+  GTK's next parent commit), so resize may lag by a frame; content presents immediately
+  via `wl_subsurface.set_desync`.
 
 **Timeline architecture:** the canvas timeline is deliberately *not* a React render
 target. `uppercut-app/src/timeline/renderer.ts` is a pure `(canvas, state) => void` draw
@@ -136,8 +141,9 @@ preview (Esc exits; bounds recompute), aspect-ratio quick-switch (`RatioMenu` �
 project canvas settings), Text panel auto-captions + Audio panel TTS voiceover, export
 dialog with progress bar / ETA / cancel (M6), M7 polish (Coming Soon panels, empty states,
 media skeletons, focus rings / scrollbars, `playback:error` toasts, pause-on-edit).
-Thumbnails/waveforms are M4. macOS/Linux native preview surfaces are implemented in
-Phase 3 (Linux requires X11; Wayland is deferred).
+Thumbnails/waveforms are M4. macOS/Linux native preview surfaces are implemented
+(Linux: X11 child window + Wayland `wl_subsurface` backends under
+`uppercut-app/src-tauri/src/preview/linux/`).
 
 Tauri commands: `quick_start_project`, `new_project`, `open_project`, `save_project`,
 `get_project`, `apply_command`, `apply_commands`, `undo`, `redo`, `export_project`,

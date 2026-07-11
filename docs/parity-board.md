@@ -19,7 +19,7 @@ GUI/CLI/MCP reachability.
 | P4-6b | Text-to-sticker | done | `GenerateSticker` (local generated PNG; not an external image model) |
 | P4-7 | Multi-cam groups + angle switch | done | `CreateMulticamGroup`, `SetMulticamAngle`; export skips inactive angles |
 | P4-ML | Core-hosted ONNX RVM/BiRefNet | open | Design gate: CLI/heuristic first; ONNX needs license review |
-| P4-Wayland | Linux Wayland native preview | open | X11 works; Wayland deferred |
+| P4-Wayland | Linux Wayland native preview | done | `wl_subsurface` + empty input region; runtime X11/Wayland dispatch; no Linux CI runner yet |
 
 ## Inference runtime decision (recorded)
 

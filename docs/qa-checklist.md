@@ -52,6 +52,9 @@ item pass/fail. Failures that crash the app or freeze the window are blockers.
       Select (V) restores transform handles; Windows preview click-through still works
 - [ ] Audio denoise (afftdn) on an audio-track clip survives export
 - [ ] Templates apply via command; multicam angle switch changes active angle
+- [ ] **Linux Wayland:** native preview aligns to the letterboxed `#preview-host` rect;
+      transport/mask overlays stay clickable (click-through); resize realigns (may lag one
+      GTK frame); X11 session still works as before
 
 ## Shortcuts quick check
 
