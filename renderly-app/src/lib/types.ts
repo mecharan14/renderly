@@ -32,12 +32,14 @@ export type AnimProperty =
   | "volume"
   | "speed";
 
-export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out";
+export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out" | "bezier";
 
 export interface Keyframe {
   time_secs: number;
   value: number;
   easing?: Easing;
+  handle_left?: [number, number];
+  handle_right?: [number, number];
 }
 
 export interface KeyframeTrack {

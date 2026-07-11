@@ -313,6 +313,7 @@ pub enum Easing {
     EaseIn,
     EaseOut,
     EaseInOut,
+    Bezier,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -322,6 +323,12 @@ pub struct Keyframe {
     pub value: f64,
     #[serde(default)]
     pub easing: Easing,
+    /// Bezier handle (time_offset, value_offset) relative to this key.
+    /// Used when easing is Bezier (Phase 4 / C7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle_left: Option<(f64, f64)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle_right: Option<(f64, f64)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -500,6 +507,13 @@ pub enum ClipMaskKind {
     Generated {
         cache_dir: PathBuf,
     },
+    /// In-memory grayscale matte (Phase 4 GPU transition).
+    #[serde(skip)]
+    Luma {
+        pixels: Vec<u8>,
+        width: u32,
+        height: u32,
+    },
 }
 
 /// Convenience alias used by mask application helpers.
@@ -668,6 +682,8 @@ pub fn split_keyframes(
                     time_secs: key.time_secs - split_offset,
                     value: key.value,
                     easing: key.easing,
+                    handle_left: key.handle_left,
+                    handle_right: key.handle_right,
                 });
             }
         }
@@ -739,16 +755,22 @@ mod tests {
                     time_secs: 0.0,
                     value: 1.0,
                     easing: Easing::Linear,
+                    handle_left: None,
+                    handle_right: None,
                 },
                 Keyframe {
                     time_secs: 2.0,
                     value: 0.5,
                     easing: Easing::Linear,
+                    handle_left: None,
+                    handle_right: None,
                 },
                 Keyframe {
                     time_secs: 4.0,
                     value: 0.0,
                     easing: Easing::Linear,
+                    handle_left: None,
+                    handle_right: None,
                 },
             ],
         }];

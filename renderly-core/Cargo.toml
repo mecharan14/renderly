@@ -17,6 +17,6 @@ thiserror.workspace = true
 uuid.workspace = true
 wasmtime = "36.0.2"
 wat = "1.235.0"
-wgpu = "30.0.0"
+    wgpu = "30.0.0"
 
 [dev-dependencies]

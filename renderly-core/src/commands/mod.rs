@@ -1691,7 +1691,10 @@ fn validate_mask(mask: &ClipMask) -> Result<(), CommandError> {
         ));
     }
     match &mask.kind {
-        ClipMaskKind::None | ClipMaskKind::Raster { .. } | ClipMaskKind::Generated { .. } => Ok(()),
+        ClipMaskKind::None
+        | ClipMaskKind::Raster { .. }
+        | ClipMaskKind::Generated { .. }
+        | ClipMaskKind::Luma { .. } => Ok(()),
         ClipMaskKind::Rect {
             x,
             y,
@@ -1953,6 +1956,7 @@ fn apply_template(
 }
 
 fn write_generated_sticker_png(path: &std::path::Path, prompt: &str) -> Result<(), CommandError> {
+    use ab_glyph::{point, Font, PxScale, ScaleFont};
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(MediaError::Io)?;
@@ -1966,8 +1970,8 @@ fn write_generated_sticker_png(path: &std::path::Path, prompt: &str) -> Result<(
     let r = ((hash >> 16) & 0xff) as u8;
     let g = ((hash >> 8) & 0xff) as u8;
     let b = (hash & 0xff) as u8;
-    let w = 256u32;
-    let h = 256u32;
+    let w = 512u32;
+    let h = 512u32;
     let mut pixels = vec![0u8; (w * h * 4) as usize];
     for px in pixels.chunks_exact_mut(4) {
         px[0] = r.max(40);
@@ -1975,23 +1979,107 @@ fn write_generated_sticker_png(path: &std::path::Path, prompt: &str) -> Result<(
         px[2] = b.max(40);
         px[3] = 255;
     }
-    // Draw a lighter border so the sticker reads as a rectangle, not a flat field.
-    for x in 0..w {
-        for y in [0u32, 1, h - 2, h - 1] {
-            let i = ((y * w + x) * 4) as usize;
-            pixels[i] = 255;
-            pixels[i + 1] = 255;
-            pixels[i + 2] = 255;
-        }
-    }
+
+    // Draw a thick rounded border
+    let radius = 32.0;
     for y in 0..h {
-        for x in [0u32, 1, w - 2, w - 1] {
-            let i = ((y * w + x) * 4) as usize;
-            pixels[i] = 255;
-            pixels[i + 1] = 255;
-            pixels[i + 2] = 255;
+        for x in 0..w {
+            let dx = if x < radius as u32 {
+                radius - x as f32
+            } else if x > w - radius as u32 {
+                x as f32 - (w as f32 - radius)
+            } else {
+                0.0
+            };
+            let dy = if y < radius as u32 {
+                radius - y as f32
+            } else if y > h - radius as u32 {
+                y as f32 - (h as f32 - radius)
+            } else {
+                0.0
+            };
+            let dist = (dx * dx + dy * dy).sqrt();
+            if dist > radius {
+                let i = ((y * w + x) * 4) as usize;
+                pixels[i + 3] = 0;
+            } else if dist > radius - 8.0 {
+                let i = ((y * w + x) * 4) as usize;
+                pixels[i] = 255;
+                pixels[i + 1] = 255;
+                pixels[i + 2] = 255;
+            }
         }
     }
+
+    // Render the text
+    if let Ok(font) = crate::captions::load_font() {
+        let scale = PxScale::from(64.0);
+        let font_scaled = font.as_scaled(scale);
+        let text = prompt.trim();
+        let mut lines = Vec::new();
+        let mut current_line = String::new();
+        for word in text.split_whitespace() {
+            let test_line = if current_line.is_empty() {
+                word.to_string()
+            } else {
+                format!("{} {}", current_line, word)
+            };
+            let width: f32 = test_line
+                .chars()
+                .map(|c| font_scaled.h_advance(font.glyph_id(c)))
+                .sum();
+            if width > w as f32 - 100.0 && !current_line.is_empty() {
+                lines.push(current_line);
+                current_line = word.to_string();
+            } else {
+                current_line = test_line;
+            }
+        }
+        if !current_line.is_empty() {
+            lines.push(current_line);
+        }
+
+        let line_height = 80.0;
+        let total_h = lines.len() as f32 * line_height;
+        let start_y = (h as f32 - total_h) / 2.0 + 50.0;
+
+        for (li, line) in lines.iter().enumerate() {
+            let glyph_width: f32 = line
+                .chars()
+                .map(|c| font_scaled.h_advance(font.glyph_id(c)))
+                .sum();
+            let start_x = (w as f32 - glyph_width) / 2.0;
+            let baseline_y = start_y + li as f32 * line_height;
+
+            let mut cursor_x = start_x;
+            for ch in line.chars() {
+                let glyph_id = font.glyph_id(ch);
+                let glyph = glyph_id.with_scale_and_position(scale, point(cursor_x, baseline_y));
+                if let Some(outlined) = font.outline_glyph(glyph) {
+                    let bounds = outlined.px_bounds();
+                    outlined.draw(|x, y, coverage| {
+                        let px = bounds.min.x as i32 + x as i32;
+                        let py = bounds.min.y as i32 + y as i32;
+                        if px >= 0 && py >= 0 && px < w as i32 && py < h as i32 {
+                            let i = ((py as u32 * w + px as u32) * 4) as usize;
+                            let c = 255; // White text
+                            let alpha = (coverage * 255.0) as u8;
+                            // Simple blend
+                            let old_a = pixels[i + 3] as f32 / 255.0;
+                            let new_a = alpha as f32 / 255.0;
+                            for j in 0..3 {
+                                pixels[i + j] =
+                                    (c as f32 * new_a + pixels[i + j] as f32 * (1.0 - new_a)) as u8;
+                            }
+                            pixels[i + 3] = ((new_a + old_a * (1.0 - new_a)) * 255.0) as u8;
+                        }
+                    });
+                }
+                cursor_x += font_scaled.h_advance(glyph_id);
+            }
+        }
+    }
+
     image::save_buffer(path, &pixels, w, h, image::ColorType::Rgba8)
         .map_err(|e| CommandError::Analysis(e.to_string()))?;
     Ok(())
@@ -2140,11 +2228,15 @@ fn replace_pos_keyframes(clip: &mut MediaClip, samples: &[(f64, f64, f64)]) {
             time_secs: t,
             value: (cx - 0.5) * 100.0,
             easing: Easing::Linear,
+            handle_left: None,
+            handle_right: None,
         });
         y_keys.push(Keyframe {
             time_secs: t,
             value: (cy - 0.5) * 100.0,
             easing: Easing::Linear,
+            handle_left: None,
+            handle_right: None,
         });
     }
     clip.keyframes.push(KeyframeTrack {
@@ -3802,11 +3894,15 @@ mod tests {
                             time_secs: 2.0,
                             value: 1.0,
                             easing: Easing::Linear,
+                            handle_left: None,
+                            handle_right: None,
                         },
                         Keyframe {
                             time_secs: 0.0,
                             value: 0.0,
                             easing: Easing::Linear,
+                            handle_left: None,
+                            handle_right: None,
                         },
                     ],
                 }],
@@ -3952,16 +4048,22 @@ mod tests {
                             time_secs: 0.0,
                             value: 1.0,
                             easing: Easing::Linear,
+                            handle_left: None,
+                            handle_right: None,
                         },
                         Keyframe {
                             time_secs: 2.0,
                             value: 0.5,
                             easing: Easing::Linear,
+                            handle_left: None,
+                            handle_right: None,
                         },
                         Keyframe {
                             time_secs: 4.0,
                             value: 0.0,
                             easing: Easing::Linear,
+                            handle_left: None,
+                            handle_right: None,
                         },
                     ],
                 }],

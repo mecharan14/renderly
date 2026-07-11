@@ -5,6 +5,7 @@ use crate::project::{EffectInstance, Project};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Mutex;
 use wasmtime::*;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -85,6 +86,7 @@ struct LoadedPlugin {
     module: Module,
     has_frame: bool,
     has_audio: bool,
+    instance: Mutex<Option<(Store<()>, Instance)>>,
 }
 
 impl PluginHost {
@@ -133,6 +135,7 @@ impl PluginHost {
             module,
             has_frame,
             has_audio,
+            instance: Mutex::new(None),
         });
         Ok(())
     }
@@ -198,34 +201,55 @@ impl PluginHost {
     }
 
     fn run_process(&self, plugin: &LoadedPlugin, frame: &mut RgbaFrame) -> Result<(), String> {
-        let mut store = Store::new(&self.engine, ());
-        let instance = Instance::new(&mut store, &plugin.module, &[]).map_err(|e| e.to_string())?;
-        let memory = instance
-            .get_memory(&mut store, "memory")
-            .ok_or_else(|| "missing memory export".to_string())?;
-        let process = instance
-            .get_typed_func::<(i32, i32, i32, i32), ()>(&mut store, "process")
-            .map_err(|e| format!("process export: {e}"))?;
+        let (mut store, instance) = {
+            let mut cache = plugin.instance.lock().map_err(|e| e.to_string())?;
+            if let Some(pair) = cache.take() {
+                pair
+            } else {
+                let mut store = Store::new(&self.engine, ());
+                let instance =
+                    Instance::new(&mut store, &plugin.module, &[]).map_err(|e| e.to_string())?;
+                (store, instance)
+            }
+        };
 
-        let nbytes = frame.pixels.len();
-        let ptr = 0i32;
-        let needed = nbytes as u64;
-        let pages_needed = needed.div_ceil(65536).max(1);
-        let current = memory.size(&store);
-        if current < pages_needed {
-            memory
-                .grow(&mut store, pages_needed - current)
-                .map_err(|e| format!("memory grow: {e}"))?;
+        let result = (|| {
+            let memory = instance
+                .get_memory(&mut store, "memory")
+                .ok_or_else(|| "missing memory export".to_string())?;
+            let process = instance
+                .get_typed_func::<(i32, i32, i32, i32), ()>(&mut store, "process")
+                .map_err(|e| format!("process export: {e}"))?;
+
+            let nbytes = frame.pixels.len();
+            let ptr = 0i32;
+            let needed = nbytes as u64;
+            let pages_needed = needed.div_ceil(65536).max(1);
+            let current = memory.size(&store);
+            if current < pages_needed {
+                memory
+                    .grow(&mut store, pages_needed - current)
+                    .map_err(|e| format!("memory grow: {e}"))?;
+            }
+            memory.data_mut(&mut store)[..nbytes].copy_from_slice(&frame.pixels);
+            process
+                .call(
+                    &mut store,
+                    (ptr, nbytes as i32, frame.width as i32, frame.height as i32),
+                )
+                .map_err(|e| format!("process call: {e}"))?;
+            frame.pixels.copy_from_slice(&memory.data(&store)[..nbytes]);
+            Ok(())
+        })();
+
+        // Return to cache if successful
+        if result.is_ok() {
+            if let Ok(mut cache) = plugin.instance.lock() {
+                *cache = Some((store, instance));
+            }
         }
-        memory.data_mut(&mut store)[..nbytes].copy_from_slice(&frame.pixels);
-        process
-            .call(
-                &mut store,
-                (ptr, nbytes as i32, frame.width as i32, frame.height as i32),
-            )
-            .map_err(|e| format!("process call: {e}"))?;
-        frame.pixels.copy_from_slice(&memory.data(&store)[..nbytes]);
-        Ok(())
+
+        result
     }
 
     fn run_process_audio(
@@ -236,50 +260,71 @@ impl PluginHost {
         channels: u32,
         intensity: f32,
     ) -> Result<(), String> {
-        let mut store = Store::new(&self.engine, ());
-        let instance = Instance::new(&mut store, &plugin.module, &[]).map_err(|e| e.to_string())?;
-        let memory = instance
-            .get_memory(&mut store, "memory")
-            .ok_or_else(|| "missing memory export".to_string())?;
-        // (ptr, sample_count, sample_rate, channels, intensity_milli)
-        let process = instance
-            .get_typed_func::<(i32, i32, i32, i32, i32), ()>(&mut store, "process_audio")
-            .map_err(|e| format!("process_audio export: {e}"))?;
+        let (mut store, instance) = {
+            let mut cache = plugin.instance.lock().map_err(|e| e.to_string())?;
+            if let Some(pair) = cache.take() {
+                pair
+            } else {
+                let mut store = Store::new(&self.engine, ());
+                let instance =
+                    Instance::new(&mut store, &plugin.module, &[]).map_err(|e| e.to_string())?;
+                (store, instance)
+            }
+        };
 
-        let nbytes = std::mem::size_of_val(samples);
-        let ptr = 0i32;
-        let needed = nbytes as u64;
-        let pages_needed = needed.div_ceil(65536).max(1);
-        let current = memory.size(&store);
-        if current < pages_needed {
-            memory
-                .grow(&mut store, pages_needed - current)
-                .map_err(|e| format!("memory grow: {e}"))?;
+        let result = (|| {
+            let memory = instance
+                .get_memory(&mut store, "memory")
+                .ok_or_else(|| "missing memory export".to_string())?;
+            // (ptr, sample_count, sample_rate, channels, intensity_milli)
+            let process = instance
+                .get_typed_func::<(i32, i32, i32, i32, i32), ()>(&mut store, "process_audio")
+                .map_err(|e| format!("process_audio export: {e}"))?;
+
+            let nbytes = std::mem::size_of_val(samples);
+            let ptr = 0i32;
+            let needed = nbytes as u64;
+            let pages_needed = needed.div_ceil(65536).max(1);
+            let current = memory.size(&store);
+            if current < pages_needed {
+                memory
+                    .grow(&mut store, pages_needed - current)
+                    .map_err(|e| format!("memory grow: {e}"))?;
+            }
+            {
+                let data = memory.data_mut(&mut store);
+                let bytes = bytemuck::cast_slice(samples);
+                data[..nbytes].copy_from_slice(bytes);
+            }
+            let intensity_milli = (intensity.clamp(0.0, 8.0) * 1000.0).round() as i32;
+            process
+                .call(
+                    &mut store,
+                    (
+                        ptr,
+                        samples.len() as i32,
+                        sample_rate as i32,
+                        channels as i32,
+                        intensity_milli,
+                    ),
+                )
+                .map_err(|e| format!("process_audio call: {e}"))?;
+            {
+                let data = memory.data(&store);
+                let out: &[f32] = bytemuck::cast_slice(&data[..nbytes]);
+                samples.copy_from_slice(out);
+            }
+            Ok(())
+        })();
+
+        // Return to cache if successful
+        if result.is_ok() {
+            if let Ok(mut cache) = plugin.instance.lock() {
+                *cache = Some((store, instance));
+            }
         }
-        {
-            let data = memory.data_mut(&mut store);
-            let bytes = bytemuck::cast_slice(samples);
-            data[..nbytes].copy_from_slice(bytes);
-        }
-        let intensity_milli = (intensity.clamp(0.0, 8.0) * 1000.0).round() as i32;
-        process
-            .call(
-                &mut store,
-                (
-                    ptr,
-                    samples.len() as i32,
-                    sample_rate as i32,
-                    channels as i32,
-                    intensity_milli,
-                ),
-            )
-            .map_err(|e| format!("process_audio call: {e}"))?;
-        {
-            let data = memory.data(&store);
-            let out: &[f32] = bytemuck::cast_slice(&data[..nbytes]);
-            samples.copy_from_slice(out);
-        }
-        Ok(())
+
+        result
     }
 }
 

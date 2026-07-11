@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Blend } from "lucide-react";
 import { setClipTransition } from "../../lib/commands";
+import { startTransitionDrag } from "../../lib/dragTransition";
 import * as ipc from "../../lib/ipc";
 import type { ClipTransition, MediaClip, TransitionKind } from "../../lib/types";
 import { clipDurationSecs, TRANSITION_KINDS } from "../../lib/types";
@@ -78,7 +79,7 @@ export function TransitionsPanel() {
   return (
     <div className="panel-body transitions-panel">
       <h3>Transitions</h3>
-      <p className="empty-hint">Outgoing blend into the next clip on this track.</p>
+      <p className="empty-hint">Outgoing blend into the next clip on this track. Drag onto a junction on the timeline.</p>
       {!next ? (
         <p className="empty-hint">No following clip — add one after this clip.</p>
       ) : (
@@ -90,6 +91,10 @@ export function TransitionsPanel() {
                 type="button"
                 className={current?.kind === t.id ? "active" : undefined}
                 disabled={locked}
+                draggable={!locked}
+                onDragStart={(e) =>
+                  startTransitionDrag(e, t.id, Math.min(0.5, Math.max(0.05, maxDur)))
+                }
                 onClick={() => pick(t.id)}
               >
                 <Blend size={14} strokeWidth={1.75} />
@@ -102,6 +107,10 @@ export function TransitionsPanel() {
                 type="button"
                 className={current?.kind === t.kind ? "active" : undefined}
                 disabled={locked}
+                draggable={!locked}
+                onDragStart={(e) =>
+                  startTransitionDrag(e, t.kind, Math.min(t.duration, Math.max(0.05, maxDur)))
+                }
                 onClick={() => pick(t.kind, t.duration)}
               >
                 <Blend size={14} strokeWidth={1.75} />

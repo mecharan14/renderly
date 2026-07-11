@@ -12,6 +12,8 @@ import { clipDurationSecs } from "../../lib/types";
 import { useEditorStore } from "../../store/editorStore";
 import { MenuSelect } from "../ui/MenuSelect";
 
+import { KeyframeGraph } from "./KeyframeGraph";
+
 const PROP_OPTIONS: { value: AnimProperty; label: string; video?: boolean; audio?: boolean }[] = [
   { value: "pos_x", label: "Position X", video: true },
   { value: "pos_y", label: "Position Y", video: true },
@@ -28,6 +30,7 @@ const EASING_OPTIONS: { value: Easing; label: string }[] = [
   { value: "ease_in", label: "Ease in" },
   { value: "ease_out", label: "Ease out" },
   { value: "ease_in_out", label: "Ease in-out" },
+  { value: "bezier", label: "Bezier" },
 ];
 
 function defaultValue(prop: AnimProperty, clip: MediaClip): number {
@@ -129,7 +132,18 @@ export function KeyframeEditor({
   }
 
   async function updateKey(idx: number, patch: Partial<Keyframe>) {
-    const keys = trackKeys.map((k, i) => (i === idx ? { ...k, ...patch } : k));
+    const keys = trackKeys.map((k, i) => {
+      if (i === idx) {
+        const next = { ...k, ...patch };
+        if (next.easing === "bezier" && !next.handle_right && !next.handle_left) {
+          // Default handles
+          next.handle_right = [0.5, 0];
+          next.handle_left = [-0.5, 0];
+        }
+        return next;
+      }
+      return k;
+    });
     await commit(keys);
   }
 
@@ -146,23 +160,14 @@ export function KeyframeEditor({
         />
       </div>
 
-      <div className="keyframe-strip" aria-hidden>
-        <div className="keyframe-strip-track">
-          {trackKeys.map((k, i) => {
-            const pct = duration > 0 ? (k.time_secs / duration) * 100 : 0;
-            return (
-              <button
-                key={`${k.time_secs}-${i}`}
-                type="button"
-                className={`keyframe-mark${selectedIdx === i ? " selected" : ""}`}
-                style={{ left: `${pct}%` }}
-                disabled={track.locked}
-                onClick={() => setSelectedIdx(i)}
-                title={`${k.time_secs.toFixed(2)}s = ${k.value}`}
-              />
-            );
-          })}
-        </div>
+      <div style={{ marginBottom: "1rem" }}>
+        <KeyframeGraph
+          track={{ property, keys: trackKeys }}
+          duration={duration}
+          width={280}
+          height={160}
+          onUpdateKey={updateKey}
+        />
       </div>
 
       <div className="inspector-actions" style={{ marginBottom: "0.5rem" }}>

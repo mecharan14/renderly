@@ -8,6 +8,7 @@ import type { Clip, Project } from "../lib/types";
 import { useEditorStore } from "../store/editorStore";
 import {
   hitTestClip,
+  hitTestTransitionJunction,
   RULER_H,
   TRACK_LABEL_W,
   secsFromCanvasX,
@@ -171,6 +172,21 @@ export function useTimelineInteractions(canvasRef: RefObject<HTMLCanvasElement |
       }
 
       if (ev.button !== 0) return;
+
+      const junctionHit = hitTestTransitionJunction(
+        project,
+        x,
+        y,
+        rect.height,
+        store.pxPerSec,
+        store.scrollX,
+        store.scrollY,
+      );
+      if (junctionHit && store.toolMode === "select" && !ev.shiftKey) {
+        store.select({ trackId: junctionHit.trackId, clipId: junctionHit.clipId });
+        store.setLeftTab("transitions");
+        return;
+      }
 
       const hit = hitTestClip(
         project,

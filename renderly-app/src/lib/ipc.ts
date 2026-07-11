@@ -108,6 +108,11 @@ export interface PackTransitionInfo {
   default_duration_secs: number;
 }
 
+export interface PackTemplateInfo {
+  id: string;
+  label: string;
+}
+
 export interface LoadedPackInfo {
   id: string;
   name: string;
@@ -116,6 +121,7 @@ export interface LoadedPackInfo {
   sfx: PackSfxInfo[];
   luts: PackLutInfo[];
   transitions: PackTransitionInfo[];
+  templates: PackTemplateInfo[];
 }
 
 export interface LoadedPluginInfo {

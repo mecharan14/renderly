@@ -952,6 +952,12 @@ struct PackTransitionInfo {
 }
 
 #[derive(Clone, serde::Serialize)]
+struct PackTemplateInfo {
+    id: String,
+    label: String,
+}
+
+#[derive(Clone, serde::Serialize)]
 struct LoadedPackInfo {
     id: String,
     name: String,
@@ -960,6 +966,7 @@ struct LoadedPackInfo {
     sfx: Vec<PackSfxInfo>,
     luts: Vec<PackLutInfo>,
     transitions: Vec<PackTransitionInfo>,
+    templates: Vec<PackTemplateInfo>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -1037,6 +1044,15 @@ async fn list_extensions(state: State<'_, AppState>) -> Result<ExtensionCatalog,
                     label: t.label.clone(),
                     kind: t.kind.clone(),
                     default_duration_secs: t.default_duration_secs,
+                })
+                .collect(),
+            templates: p
+                .manifest
+                .templates
+                .iter()
+                .map(|t| PackTemplateInfo {
+                    id: t.id.clone(),
+                    label: t.label.clone(),
                 })
                 .collect(),
         })

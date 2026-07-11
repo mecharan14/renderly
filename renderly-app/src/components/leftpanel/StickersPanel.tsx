@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Music, Sticker } from "lucide-react";
-import { addSfxFromPack, addStickerFromPack, addTrack } from "../../lib/commands";
+import { Music, Sparkles, Sticker } from "lucide-react";
+import { addSfxFromPack, addStickerFromPack, addTrack, generateSticker } from "../../lib/commands";
 import * as ipc from "../../lib/ipc";
 import type { ExtensionCatalog } from "../../lib/ipc";
 import { clipDurationSecs, type Track, type TrackKind } from "../../lib/types";
@@ -20,6 +20,8 @@ export function StickersPanel() {
   const dispatch = useEditorStore((s) => s.dispatch);
   const toast = useEditorStore((s) => s.toast);
   const [catalog, setCatalog] = useState<ExtensionCatalog | null>(null);
+  const [stickerPrompt, setStickerPrompt] = useState("");
+  const [genBusy, setGenBusy] = useState(false);
 
   useEffect(() => {
     if (!project) {
@@ -87,6 +89,26 @@ export function StickersPanel() {
     await dispatch(addSfxFromPack(packId, sfxId, track.id, playhead));
   }
 
+  async function generateAiSticker() {
+    if (!stickerPrompt.trim() || !project) return;
+    setGenBusy(true);
+    try {
+      const track = await resolveOverlayTrack("video", "Stickers", playhead, DEFAULT_STICKER_SECS);
+      if (!track) return;
+      const outputPath = `${project.name.replace(/[^\w-]+/g, "_")}-sticker-${Date.now()}.png`;
+      toast("Generating sticker…", "info");
+      const ok = await dispatch(
+        generateSticker(stickerPrompt.trim(), track.id, playhead, outputPath),
+      );
+      if (ok) {
+        toast("Sticker generated", "success");
+        setStickerPrompt("");
+      }
+    } finally {
+      setGenBusy(false);
+    }
+  }
+
   if (!project) {
     return (
       <div className="panel-body">
@@ -98,7 +120,30 @@ export function StickersPanel() {
 
   return (
     <div className="panel-body">
-      <h3>Stickers</h3>
+      <div className="inspector-section">
+        <h3>Generate sticker</h3>
+        <p className="empty-hint">Local placeholder art from a text prompt (Phase 4).</p>
+        <div className="field">
+          <label>Prompt</label>
+          <input
+            type="text"
+            value={stickerPrompt}
+            placeholder="e.g. red heart emoji"
+            onChange={(e) => setStickerPrompt(e.target.value)}
+          />
+        </div>
+        <button
+          type="button"
+          className="btn-primary"
+          disabled={genBusy || !stickerPrompt.trim()}
+          onClick={() => void generateAiSticker()}
+        >
+          <Sparkles size={14} strokeWidth={1.75} />
+          {genBusy ? "Generating…" : "Generate at playhead"}
+        </button>
+      </div>
+
+      <h3>Pack stickers</h3>
       <p className="empty-hint">Placed at the playhead on a Stickers overlay track.</p>
       {stickers.length === 0 ? (
         <p className="empty-hint">Load a pack with stickers (Extensions tab).</p>

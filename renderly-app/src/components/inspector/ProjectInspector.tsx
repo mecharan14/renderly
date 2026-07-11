@@ -4,6 +4,7 @@ import { useEditorStore } from "../../store/editorStore";
 import { setProjectSettings } from "../../lib/commands";
 import { ASPECT_PRESETS } from "../../lib/types";
 import { MenuSelect } from "../ui/MenuSelect";
+import { MulticamSection } from "./MulticamSection";
 
 export function ProjectInspector() {
   const project = useEditorStore((s) => s.project);
@@ -121,6 +122,8 @@ export function ProjectInspector() {
           </button>
         </div>
       </div>
+
+      <MulticamSection project={project} clip={null} />
     </div>
   );
 }

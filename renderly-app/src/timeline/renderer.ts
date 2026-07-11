@@ -4,7 +4,15 @@
 
 import { fileName, formatTimecode } from "../lib/format";
 import { clipDurationSecs, type Project, type Selection, type Track } from "../lib/types";
-import { clipLeft, RULER_H, secsFromCanvasX, timelineDuration, trackLayout, TRACK_LABEL_W } from "./layout";
+import {
+  clipLeft,
+  listTransitionJunctions,
+  RULER_H,
+  secsFromCanvasX,
+  timelineDuration,
+  trackLayout,
+  TRACK_LABEL_W,
+} from "./layout";
 import { getTimelineTheme } from "./theme";
 import type { DragGhost, MediaAssetEntry, ThumbnailAsset, WaveformAsset } from "../store/editorStore";
 
@@ -18,6 +26,8 @@ export interface TimelineRenderState {
   scrollX?: number;
   scrollY?: number;
   dragGhost?: DragGhost | null;
+  /** C4: highlighted junction while dragging a transition from the panel. */
+  transitionDropTarget?: { trackId: string; clipId: string; valid: boolean } | null;
   snapGuideSecs?: number | null;
   mediaAssets?: Record<string, MediaAssetEntry>;
 }
@@ -146,6 +156,77 @@ function drawLockedHatch(ctx: CanvasRenderingContext2D, x: number, y: number, w:
     ctx.stroke();
   }
   ctx.restore();
+}
+
+/// C4: chevron badge + overlap tint at clip junctions where an outgoing transition applies.
+function drawTransitionJunctions(
+  ctx: CanvasRenderingContext2D,
+  project: Project,
+  pxPerSec: number,
+  canvasW: number,
+  canvasH: number,
+  scrollX: number,
+  scrollY: number,
+  dropTarget: { trackId: string; clipId: string; valid: boolean } | null | undefined,
+) {
+  const theme = getTimelineTheme();
+  const junctions = listTransitionJunctions(project, canvasH, pxPerSec, scrollX, scrollY);
+
+  for (const j of junctions) {
+    if (j.junctionX < TRACK_LABEL_W - 8 || j.junctionX > canvasW + 8) continue;
+
+    const isTarget =
+      dropTarget?.trackId === j.trackId && dropTarget.clipId === j.outgoingClipId;
+    const targetColor = dropTarget?.valid ? theme.accent : theme.danger;
+
+    if (j.overlapPx > 0) {
+      const ox = j.junctionX - j.overlapPx;
+      ctx.save();
+      ctx.globalAlpha = 0.22;
+      ctx.fillStyle = theme.accent;
+      ctx.fillRect(ox, j.bodyY, j.overlapPx, j.bodyH);
+      ctx.fillRect(j.junctionX, j.bodyY, j.overlapPx, j.bodyH);
+      ctx.globalAlpha = 1;
+      ctx.restore();
+    }
+
+    const badgeW = 12;
+    const badgeH = 16;
+    const bx = j.junctionX - badgeW - 2;
+    const by = j.bodyY + (j.bodyH - badgeH) / 2;
+
+    ctx.save();
+    if (isTarget) {
+      ctx.strokeStyle = targetColor;
+      ctx.lineWidth = 2;
+      roundRect(ctx, bx - 3, by - 3, badgeW + 6, badgeH + 6, 4);
+      ctx.stroke();
+    }
+
+    ctx.fillStyle = j.transition ? theme.accent : theme.text3;
+    ctx.globalAlpha = j.transition ? 0.95 : 0.55;
+    roundRect(ctx, bx, by, badgeW, badgeH, 3);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // Chevron (two triangles meeting at the junction)
+    ctx.fillStyle = theme.timelineBg;
+    const cx = bx + badgeW / 2;
+    const cy = by + badgeH / 2;
+    ctx.beginPath();
+    ctx.moveTo(cx - 3, cy - 4);
+    ctx.lineTo(cx + 1, cy);
+    ctx.lineTo(cx - 3, cy + 4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(cx + 3, cy - 4);
+    ctx.lineTo(cx - 1, cy);
+    ctx.lineTo(cx + 3, cy + 4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
 }
 
 function drawDragGhost(
@@ -429,6 +510,17 @@ export function renderTimeline(canvas: HTMLCanvasElement, state: TimelineRenderS
       drawLockedHatch(ctx, TRACK_LABEL_W, y, w - TRACK_LABEL_W, trackH);
     }
   });
+
+  drawTransitionJunctions(
+    ctx,
+    project,
+    pxPerSec,
+    w,
+    h,
+    scrollX,
+    scrollY,
+    state.transitionDropTarget,
+  );
 
   if (dragGhost) {
     drawDragGhost(ctx, project, dragGhost, pxPerSec, w, h, scrollX, scrollY);

@@ -456,3 +456,66 @@ pub fn sync_discovery_project(app: &AppHandle, path: Option<PathBuf>) {
         bridge.set_project_path(path);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn check_token_accepts_only_exact_match() {
+        assert!(check_token("secret", &json!({ "token": "secret" })).is_ok());
+        assert_eq!(
+            check_token("secret", &json!({ "token": "wrong" })).unwrap_err(),
+            "invalid auth token"
+        );
+        assert_eq!(
+            check_token("secret", &json!({})).unwrap_err(),
+            "missing auth token"
+        );
+        // Non-string token must not pass.
+        assert!(check_token("secret", &json!({ "token": 42 })).is_err());
+    }
+
+    #[test]
+    fn random_token_is_hex_and_unique() {
+        let a = random_token();
+        let b = random_token();
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn discovery_file_round_trips_for_mcp_client() {
+        let path = std::env::temp_dir()
+            .join(format!("renderly-bridge-test-{}", std::process::id()))
+            .join("bridge.json");
+        write_discovery(&path, 45678, "tok", Some("D:/p.renderly.json")).unwrap();
+        let disc: BridgeDiscovery =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(disc.pid, std::process::id());
+        assert_eq!(disc.port, 45678);
+        assert_eq!(disc.token, "tok");
+        assert_eq!(disc.project_path.as_deref(), Some("D:/p.renderly.json"));
+
+        // Clearing the project path must keep the file valid for path-match checks.
+        write_discovery(&path, 45678, "tok", None).unwrap();
+        let disc: BridgeDiscovery =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(disc.project_path.is_none());
+
+        remove_discovery(&path);
+        assert!(!path.exists());
+        std::fs::remove_dir(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn base64_encode_matches_known_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+}

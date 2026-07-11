@@ -241,7 +241,7 @@ finite times, finite values, opacity keys in `0..=1`; sorts keys by time on writ
 ### `SetClipEffects` (Phase 3.1 / 3.4 / 3)
 Replaces the effect-instance list on a media clip. Validates unique instance ids, known
 `effect_id`s (builtins, loaded `pack:…:lut:…`, loaded `wasm:…`), finite params, and clamps
-known params. GPU builtins run in the compositor; pack LUTs and WASM effects run on the CPU
+known params. GPU builtins and pack `.cube` LUTs run in the compositor; WASM frame effects run on the CPU
 frame before upload.
 
 - Errors: track/clip not found, not a media clip, or invalid effect list.

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { FolderOpen, Package, Puzzle, Trash2 } from "lucide-react";
+import { FolderOpen, LayoutTemplate, Package, Puzzle, Trash2 } from "lucide-react";
 import {
+  applyTemplate,
   loadAssetPack,
   loadWasmPlugin,
   unloadAssetPack,
@@ -12,6 +13,7 @@ import { useEditorStore } from "../../store/editorStore";
 
 export function ExtensionsPanel() {
   const project = useEditorStore((s) => s.project);
+  const playhead = useEditorStore((s) => s.playhead);
   const dispatch = useEditorStore((s) => s.dispatch);
   const toast = useEditorStore((s) => s.toast);
   const [catalog, setCatalog] = useState<ExtensionCatalog | null>(null);
@@ -138,7 +140,27 @@ export function ExtensionsPanel() {
               </div>
               <p className="empty-hint" style={{ margin: 0 }}>
                 {p.stickers.length} stickers · {p.sfx.length} sfx · {p.luts.length} LUTs
+                {(p.templates?.length ?? 0) > 0 ? ` · ${p.templates!.length} templates` : ""}
               </p>
+              {(p.templates?.length ?? 0) > 0 && (
+                <div className="effects-catalog" style={{ marginTop: "0.5rem" }}>
+                  {p.templates!.map((t) => (
+                    <button
+                      key={`${p.id}:${t.id}`}
+                      type="button"
+                      disabled={busy}
+                      onClick={() =>
+                        void dispatch(applyTemplate(p.id, t.id, playhead)).then((ok) => {
+                          if (ok) toast(`Applied template: ${t.label}`, "success");
+                        })
+                      }
+                    >
+                      <LayoutTemplate size={14} strokeWidth={1.75} />
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </li>
           ))}
         </ul>

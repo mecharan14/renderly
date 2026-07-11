@@ -1,9 +1,21 @@
-import { FilePlus, FolderOpen, Save, Undo2, Redo2, Download, House } from "lucide-react";
+import {
+  FilePlus,
+  FolderOpen,
+  Save,
+  Undo2,
+  Redo2,
+  Download,
+  House,
+  Sun,
+  Moon,
+  Monitor,
+} from "lucide-react";
 import { useEditorStore } from "../store/editorStore";
 import { getAction, invokeAction } from "../lib/actions";
 import { IconButton } from "./ui/IconButton";
 import { WindowControls } from "./ui/WindowControls";
 import * as ipc from "../lib/ipc";
+import { getThemePreference } from "../lib/theme";
 
 function BrandMark() {
   return (
@@ -31,6 +43,9 @@ export function TopBar({ onExport }: { onExport: () => void }) {
   const canUndo = useEditorStore((s) => s.canUndo);
   const canRedo = useEditorStore((s) => s.canRedo);
   const saveStatus = useEditorStore((s) => s.saveStatus);
+  // Subscribe (without binding) so the theme icon re-renders when the theme cycles;
+  // getThemePreference() below is not reactive on its own.
+  useEditorStore((s) => s.themeEpoch);
 
   const hasProject = !!project;
 
@@ -91,6 +106,17 @@ export function TopBar({ onExport }: { onExport: () => void }) {
       </div>
 
       <span className="spacer" data-tauri-drag-region />
+
+      <div className="topbar-group">
+        <IconButton
+          icon={
+            getThemePreference() === "dark" ? Moon : getThemePreference() === "light" ? Sun : Monitor
+          }
+          iconOnly
+          tooltip={actionTooltip("view.cycle-theme", "Cycle theme")}
+          onClick={() => invokeAction("view.cycle-theme")}
+        />
+      </div>
 
       <div className={`project-chip${hasProject ? " live" : ""}`} data-tauri-drag-region>
         <span className="dot" />

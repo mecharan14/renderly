@@ -26,6 +26,14 @@ pub fn apply_clip_mask(frame: &mut RgbaFrame, mask: &ClipMask) {
                 apply_raster_matte(frame, &matte.to_luma8(), mask.invert, mask.feather);
             }
         }
+        ClipMaskKind::Luma {
+            pixels,
+            width,
+            height,
+        } => {
+            let matte = image::GrayImage::from_raw(*width, *height, pixels.clone()).unwrap();
+            apply_raster_matte(frame, &matte, mask.invert, mask.feather);
+        }
     }
 }
 

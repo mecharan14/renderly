@@ -102,6 +102,12 @@ export interface DragGhost {
   valid: boolean;
 }
 
+export interface TransitionDropTarget {
+  trackId: string;
+  clipId: string;
+  valid: boolean;
+}
+
 export interface EditorStore {
   project: Project | null;
   projectPath: string | null;
@@ -127,6 +133,8 @@ export interface EditorStore {
   importBusy: boolean;
   clipboard: { items: { clip: Clip; trackKind: TrackKind }[] } | null;
   dragGhost: DragGhost | null;
+  /** C4: junction highlighted while dragging a transition onto the timeline. */
+  transitionDropTarget: TransitionDropTarget | null;
   contextMenu: { x: number; y: number; trackId: string; clipId: string; atSecs: number } | null;
   snapGuideSecs: number | null;
   /// True while a timeline mouse drag (move/trim) is in progress — set by
@@ -166,6 +174,7 @@ export interface EditorStore {
   panBy(dx: number, dy: number): void;
   ensurePlayheadVisible(): void;
   setDragGhost(ghost: DragGhost | null): void;
+  setTransitionDropTarget(target: TransitionDropTarget | null): void;
   dropMediaOnTimeline(): Promise<void>;
   openContextMenu(x: number, y: number, trackId: string, clipId: string, atSecs: number): void;
   closeContextMenu(): void;
@@ -229,6 +238,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   importBusy: false,
   clipboard: null,
   dragGhost: null,
+  transitionDropTarget: null,
   contextMenu: null,
   snapGuideSecs: null,
   isDragging: false,
@@ -387,6 +397,10 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   },
   setDragGhost(ghost) {
     set({ dragGhost: ghost });
+  },
+
+  setTransitionDropTarget(target) {
+    set({ transitionDropTarget: target });
   },
   openContextMenu(x, y, trackId, clipId, atSecs) {
     const sel = { trackId, clipId };

@@ -352,6 +352,7 @@ impl FrameRenderer {
         readback: bool,
     ) -> Result<(Option<Vec<u8>>, FrameTiming), ExportError> {
         let layers = active_layers(project, time_secs)?;
+        let packs = crate::packs::load_project_packs(project);
         let mut compose_layers = Vec::with_capacity(layers.len() + 2);
         let plugin_host = crate::plugins::PluginHost::for_project(project).ok();
 
@@ -372,21 +373,22 @@ impl FrameRenderer {
             let frame = decoder.frame_at(layer.source_time)?;
             decode_secs += decode_start.elapsed().as_secs_f64();
             if let Some(mut frame) = frame {
-                crate::packs::apply_pack_effects(project, &mut frame, &layer.effects);
                 if let Some(host) = plugin_host.as_ref() {
                     let _ = host.apply_effects(&mut frame, &layer.effects);
                 }
-                crate::compose::apply_chroma_effects(&mut frame, &layer.effects);
-                if let Some(bg) = layer.background_removal.as_ref().filter(|b| b.enabled) {
-                    apply_background_removal_matte(&mut frame, bg);
-                }
-                if let Some(mask) = layer.mask.as_ref() {
-                    crate::mask::apply_clip_mask(&mut frame, mask);
-                }
+
+                let mask = if let Some(bg) = layer.background_removal.as_ref().filter(|b| b.enabled)
+                {
+                    resolve_background_removal_mask(&frame, bg)
+                } else {
+                    layer.mask.clone()
+                };
+
                 compose_layers.push(ComposeLayer {
                     frame,
                     transform: layer.transform,
                     effects: layer.effects.clone(),
+                    mask,
                     transition: layer.transition,
                 });
             }
@@ -403,15 +405,17 @@ impl FrameRenderer {
                 )?,
                 transform: ClipTransform::default(),
                 effects: Vec::new(),
+                mask: None,
                 transition: None,
             });
         }
 
         let compose_start = Instant::now();
         let pixels = if readback {
-            Some(self.compositor.composite(&compose_layers)?)
+            Some(self.compositor.composite(&packs, &compose_layers)?)
         } else {
-            self.compositor.compose_to_texture(&compose_layers)?;
+            self.compositor
+                .compose_to_texture(&packs, &compose_layers)?;
             None
         };
         let compose_secs = compose_start.elapsed().as_secs_f64();
@@ -1089,24 +1093,35 @@ fn multicam_angle_active(project: &Project, clip: &crate::project::MediaClip) ->
         .unwrap_or(false)
 }
 
-fn apply_background_removal_matte(frame: &mut RgbaFrame, cfg: &crate::project::BackgroundRemoval) {
+fn resolve_background_removal_mask(
+    frame: &RgbaFrame,
+    cfg: &crate::project::BackgroundRemoval,
+) -> Option<crate::project::ClipMask> {
     use crate::project::{ClipMask, ClipMaskKind};
 
     if let Some(dir) = cfg.matte_cache_dir.as_ref() {
-        let mask = ClipMask {
+        return Some(ClipMask {
             enabled: true,
             invert: false,
             feather: cfg.feather,
             kind: ClipMaskKind::Generated {
                 cache_dir: dir.clone(),
             },
-        };
-        crate::mask::apply_clip_mask(frame, &mask);
-        return;
+        });
     }
+
     // Live heuristic matte when no cache has been baked yet.
     let matte = crate::mask::generate_heuristic_matte(frame, cfg.threshold);
-    crate::mask::apply_luma_matte(frame, &matte, false, cfg.feather);
+    Some(ClipMask {
+        enabled: true,
+        invert: false,
+        feather: cfg.feather,
+        kind: ClipMaskKind::Luma {
+            pixels: matte.into_raw(),
+            width: frame.width,
+            height: frame.height,
+        },
+    })
 }
 
 fn active_captions(project: &Project, t: f64) -> Vec<ActiveCaption> {

@@ -201,8 +201,40 @@ pub fn effect_id_for_lut(pack_id: &str, lut_id: &str) -> String {
     format!("pack:{pack_id}:lut:{lut_id}")
 }
 
+pub fn find_cube_lut<'a>(
+    packs: &'a [LoadedPack],
+    pack_id: &str,
+    lut_id: &str,
+) -> Option<&'a CubeLut> {
+    find_pack(packs, pack_id)?.luts.get(lut_id)
+}
+
+/// RGBA8 bytes for uploading a `.cube` LUT as a `D3` texture (R fastest, then G, then B).
+pub fn cube_lut_upload_bytes(cube: &CubeLut) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(cube.data.len() * 4);
+    for rgb in &cube.data {
+        bytes.push((rgb[0].clamp(0.0, 1.0) * 255.0) as u8);
+        bytes.push((rgb[1].clamp(0.0, 1.0) * 255.0) as u8);
+        bytes.push((rgb[2].clamp(0.0, 1.0) * 255.0) as u8);
+        bytes.push(255);
+    }
+    bytes
+}
+
 /// Apply enabled pack LUT effects (CPU) to a frame in list order.
+///
+/// Pack LUTs are normally applied on the GPU in [`crate::compose::effects::EffectProcessor`]
+/// (improvement-plan A7). This path remains for tests and headless fallbacks.
 pub fn apply_pack_effects(project: &Project, frame: &mut RgbaFrame, effects: &[EffectInstance]) {
+    apply_pack_effects_cpu(project, frame, effects);
+}
+
+/// CPU trilinear pack LUT application (see [`apply_pack_effects`]).
+pub fn apply_pack_effects_cpu(
+    project: &Project,
+    frame: &mut RgbaFrame,
+    effects: &[EffectInstance],
+) {
     let packs = load_project_packs(project);
     for effect in effects.iter().filter(|e| e.enabled) {
         let Some((pack_id, lut_id)) = parse_pack_lut_id(&effect.effect_id) else {
@@ -357,6 +389,15 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn cube_upload_bytes_len() {
+        let cube = CubeLut {
+            size: 2,
+            data: vec![[0.0, 0.0, 0.0]; 8],
+        };
+        assert_eq!(cube_lut_upload_bytes(&cube).len(), 8 * 4);
+    }
 
     #[test]
     fn parse_identity_cube() {

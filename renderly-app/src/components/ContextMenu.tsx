@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useEditorStore } from "../store/editorStore";
-import { setClipEnabled, splitClip } from "../lib/commands";
+import { setClipEnabled, splitClip, trackMotion, stabilizeClip, autoReframeClip } from "../lib/commands";
 import { invokeAction } from "../lib/actions";
 
 export function ContextMenu() {
@@ -9,6 +9,7 @@ export function ContextMenu() {
   const dispatch = useEditorStore((s) => s.dispatch);
   const closeContextMenu = useEditorStore((s) => s.closeContextMenu);
   const clipboard = useEditorStore((s) => s.clipboard);
+  const toast = useEditorStore((s) => s.toast);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
 
@@ -50,6 +51,17 @@ export function ContextMenu() {
   const clip = track?.clips.find((c) => c.id === menu.clipId);
   const locked = track?.locked ?? false;
   const isMedia = clip?.type === "video" || clip?.type === "audio";
+  const isVideo = clip?.type === "video";
+  const targetAspect =
+    project && project.settings.height > 0
+      ? project.settings.width / project.settings.height
+      : 9 / 16;
+
+  async function runAnalysis(label: string, fn: () => Promise<boolean>) {
+    toast(`${label}…`, "info");
+    const ok = await fn();
+    if (ok) toast(`${label} complete`, "success");
+  }
 
   function run(fn: () => void) {
     closeContextMenu();
@@ -90,6 +102,50 @@ export function ContextMenu() {
         >
           {clip.enabled ? "Disable clip" : "Enable clip"}
         </button>
+      )}
+      {isVideo && (
+        <>
+          <div className="context-menu-divider" />
+          <button
+            type="button"
+            disabled={locked}
+            onClick={() =>
+              run(() =>
+                void runAnalysis("Track motion", () =>
+                  dispatch(trackMotion(menu.trackId, menu.clipId, 12)),
+                ),
+              )
+            }
+          >
+            Track motion
+          </button>
+          <button
+            type="button"
+            disabled={locked}
+            onClick={() =>
+              run(() =>
+                void runAnalysis("Stabilize", () =>
+                  dispatch(stabilizeClip(menu.trackId, menu.clipId)),
+                ),
+              )
+            }
+          >
+            Stabilize
+          </button>
+          <button
+            type="button"
+            disabled={locked}
+            onClick={() =>
+              run(() =>
+                void runAnalysis("Auto-reframe", () =>
+                  dispatch(autoReframeClip(menu.trackId, menu.clipId, targetAspect)),
+                ),
+              )
+            }
+          >
+            Auto-reframe
+          </button>
+        </>
       )}
       <div className="context-menu-divider" />
       <button

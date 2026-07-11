@@ -74,7 +74,7 @@ fn style_spec(style_id: &str) -> StyleSpec {
     }
 }
 
-fn load_font() -> Result<FontArc, CaptionError> {
+pub(crate) fn load_font() -> Result<FontArc, CaptionError> {
     if let Ok(path) = std::env::var("RENDERLY_FONT_PATH") {
         let data = std::fs::read(&path).map_err(|e| CaptionError::FontLoad(e.to_string()))?;
         return FontArc::try_from_vec(data).map_err(|e| CaptionError::FontLoad(e.to_string()));

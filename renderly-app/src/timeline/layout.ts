@@ -1,7 +1,14 @@
 // Pure geometry helpers shared by renderer.ts (drawing) and interactions.ts (hit-testing) —
 // keeping both in agreement about where things are on the canvas.
 
-import { clipDurationSecs, type Clip, type Project } from "../lib/types";
+import {
+  clipDurationSecs,
+  type Clip,
+  type ClipTransition,
+  type MediaClip,
+  type Project,
+  type Track,
+} from "../lib/types";
 
 export const TRACK_LABEL_W = 88;
 export const RULER_H = 24;
@@ -107,6 +114,107 @@ export function hitTestClip(
         return { trackId: track.id, clip, trackIndex: ti, edge: "right" };
       }
       return { trackId: track.id, clip, trackIndex: ti, edge: "body" };
+    }
+  }
+  return null;
+}
+
+/// Next video clip on the same track at or after `clip`'s timeline end (C4 junction target).
+export function nextVideoClipOnTrack(track: Track, clip: MediaClip): MediaClip | null {
+  const end = clip.position_secs + clipDurationSecs(clip);
+  return (
+    [...track.clips]
+      .filter((c): c is MediaClip => c.type === "video")
+      .sort((a, b) => a.position_secs - b.position_secs)
+      .find((c) => c.id !== clip.id && c.position_secs >= end - 1e-6) ?? null
+  );
+}
+
+export interface TransitionJunction {
+  trackId: string;
+  trackIndex: number;
+  outgoingClipId: string;
+  junctionSecs: number;
+  junctionX: number;
+  laneY: number;
+  laneH: number;
+  bodyY: number;
+  bodyH: number;
+  transition: ClipTransition | null;
+  overlapPx: number;
+}
+
+const JUNCTION_HIT_HALF_W = 10;
+
+export function listTransitionJunctions(
+  project: Project,
+  canvasHeight: number,
+  pxPerSec: number,
+  scrollX = 0,
+  scrollY = 0,
+): TransitionJunction[] {
+  const { trackH, laneTop } = trackLayout(canvasHeight, project.tracks.length, scrollY);
+  const out: TransitionJunction[] = [];
+
+  for (let ti = 0; ti < project.tracks.length; ti++) {
+    const track = project.tracks[ti];
+    if (track.kind !== "video") continue;
+    const y = laneTop(ti);
+    const bodyY = y + 18;
+    const bodyH = trackH - 22;
+
+    const videos = [...track.clips]
+      .filter((c): c is MediaClip => c.type === "video")
+      .sort((a, b) => a.position_secs - b.position_secs);
+
+    for (const clip of videos) {
+      const next = nextVideoClipOnTrack(track, clip);
+      if (!next) continue;
+      const junctionSecs = clip.position_secs + clipDurationSecs(clip);
+      const junctionX = clipLeft(junctionSecs, pxPerSec, scrollX);
+      const transition = clip.outgoing_transition ?? null;
+      const overlapPx = transition ? Math.max(4, transition.duration_secs * pxPerSec) : 0;
+      out.push({
+        trackId: track.id,
+        trackIndex: ti,
+        outgoingClipId: clip.id,
+        junctionSecs,
+        junctionX,
+        laneY: y,
+        laneH: trackH,
+        bodyY,
+        bodyH,
+        transition,
+        overlapPx,
+      });
+    }
+  }
+  return out;
+}
+
+export interface TransitionJunctionHit {
+  trackId: string;
+  clipId: string;
+  trackIndex: number;
+}
+
+export function hitTestTransitionJunction(
+  project: Project,
+  x: number,
+  y: number,
+  canvasHeight: number,
+  pxPerSec: number,
+  scrollX = 0,
+  scrollY = 0,
+): TransitionJunctionHit | null {
+  for (const j of listTransitionJunctions(project, canvasHeight, pxPerSec, scrollX, scrollY)) {
+    if (y < j.bodyY || y > j.bodyY + j.bodyH) continue;
+    // Badge sits just inside the outgoing clip — avoid the right-edge trim handle.
+    if (x >= j.junctionX - 16 && x <= j.junctionX) {
+      return { trackId: j.trackId, clipId: j.outgoingClipId, trackIndex: j.trackIndex };
+    }
+    if (Math.abs(x - j.junctionX) <= JUNCTION_HIT_HALF_W && y >= j.bodyY + 4 && y <= j.bodyY + j.bodyH - 4) {
+      return { trackId: j.trackId, clipId: j.outgoingClipId, trackIndex: j.trackIndex };
     }
   }
   return null;

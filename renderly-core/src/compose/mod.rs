@@ -12,7 +12,8 @@ pub use chroma::apply_chroma_effects;
 pub use effects::{builtin_effect_ids, default_params, BUILTIN_EFFECT_IDS};
 
 use crate::media::RgbaFrame;
-use crate::project::{ClipTransform, EffectInstance, TransitionKind};
+use crate::packs::LoadedPack;
+use crate::project::{ClipMask, ClipTransform, EffectInstance, TransitionKind};
 use effects::EffectProcessor;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,6 +43,8 @@ pub struct ComposeLayer {
     pub transform: ClipTransform,
     /// Builtin effect instances (Phase 3.4). Empty / all-disabled → identity path.
     pub effects: Vec<EffectInstance>,
+    /// Optional clip mask (Phase 4).
+    pub mask: Option<ClipMask>,
     /// When set on two consecutive layers (outgoing then incoming), uses the transition pass.
     pub transition: Option<LayerTransition>,
 }
@@ -52,6 +55,7 @@ impl From<RgbaFrame> for ComposeLayer {
             frame,
             transform: ClipTransform::default(),
             effects: Vec::new(),
+            mask: None,
             transition: None,
         }
     }
@@ -398,13 +402,17 @@ impl Compositor {
     /// Composite layers onto the internal RT and leave the result on the GPU (no
     /// `copy_texture_to_buffer` / map). Preview samples [`Self::output_view`] on the
     /// shared device; export/MCP keep [`Self::composite`] for the CPU path.
-    pub fn compose_to_texture(&mut self, layers: &[ComposeLayer]) -> Result<(), ComposeError> {
+    pub fn compose_to_texture(
+        &mut self,
+        packs: &[LoadedPack],
+        layers: &[ComposeLayer],
+    ) -> Result<(), ComposeError> {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("compose-gpu"),
             });
-        let keep_alive = self.encode_layers(layers, &mut encoder)?;
+        let keep_alive = self.encode_layers(packs, layers, &mut encoder)?;
         self.queue.submit(Some(encoder.finish()));
         for texture in keep_alive {
             self.layer_pool.give_back(texture);
@@ -416,14 +424,18 @@ impl Compositor {
     ///
     /// Per layer: upload → optional builtin effect chain (ping-pong) → cover+transform
     /// composite draw. Layers with empty/disabled effects take the same path as before.
-    pub fn composite(&mut self, layers: &[ComposeLayer]) -> Result<Vec<u8>, ComposeError> {
+    pub fn composite(
+        &mut self,
+        packs: &[LoadedPack],
+        layers: &[ComposeLayer],
+    ) -> Result<Vec<u8>, ComposeError> {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("export-frame"),
             });
 
-        let keep_alive = self.encode_layers(layers, &mut encoder)?;
+        let keep_alive = self.encode_layers(packs, layers, &mut encoder)?;
 
         let bytes_per_row = self.width * 4;
         let padded_bytes_per_row =
@@ -490,6 +502,7 @@ impl Compositor {
 
     fn encode_layers(
         &mut self,
+        packs: &[LoadedPack],
         layers: &[ComposeLayer],
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<Vec<wgpu::Texture>, ComposeError> {
@@ -538,15 +551,27 @@ impl Compositor {
             if let Some((kind, progress)) = pair {
                 self.transitions
                     .ensure_rts(&self.device, self.width, self.height);
-                self.draw_layer_to_transition_rt(&layers[i], true, encoder, &mut keep_alive)?;
-                self.draw_layer_to_transition_rt(&layers[i + 1], false, encoder, &mut keep_alive)?;
+                self.draw_layer_to_transition_rt(
+                    packs,
+                    &layers[i],
+                    true,
+                    encoder,
+                    &mut keep_alive,
+                )?;
+                self.draw_layer_to_transition_rt(
+                    packs,
+                    &layers[i + 1],
+                    false,
+                    encoder,
+                    &mut keep_alive,
+                )?;
                 self.transitions
                     .blend(&self.device, encoder, &self.output_view, kind, progress)?;
                 i += 2;
                 continue;
             }
 
-            self.draw_layer_to_output(&layers[i], encoder, &mut keep_alive)?;
+            self.draw_layer_to_output(packs, &layers[i], encoder, &mut keep_alive)?;
             i += 1;
         }
 
@@ -555,21 +580,24 @@ impl Compositor {
 
     fn draw_layer_to_output(
         &mut self,
+        packs: &[LoadedPack],
         layer: &ComposeLayer,
         encoder: &mut wgpu::CommandEncoder,
         keep_alive: &mut Vec<wgpu::Texture>,
     ) -> Result<(), ComposeError> {
-        self.draw_layer(layer, DrawTarget::Output, encoder, keep_alive)
+        self.draw_layer(packs, layer, DrawTarget::Output, encoder, keep_alive)
     }
 
     fn draw_layer_to_transition_rt(
         &mut self,
+        packs: &[LoadedPack],
         layer: &ComposeLayer,
         to_a: bool,
         encoder: &mut wgpu::CommandEncoder,
         keep_alive: &mut Vec<wgpu::Texture>,
     ) -> Result<(), ComposeError> {
         self.draw_layer(
+            packs,
             layer,
             if to_a {
                 DrawTarget::TransitionA
@@ -583,6 +611,7 @@ impl Compositor {
 
     fn draw_layer(
         &mut self,
+        packs: &[LoadedPack],
         layer: &ComposeLayer,
         target: DrawTarget,
         encoder: &mut wgpu::CommandEncoder,
@@ -624,11 +653,14 @@ impl Compositor {
 
         let use_effects = self.effects.apply(
             &self.device,
+            &self.queue,
             encoder,
             &uploaded_view,
             frame.width,
             frame.height,
             &layer.effects,
+            layer.mask.as_ref(),
+            packs,
         )?;
 
         let params = layer_params(
@@ -880,25 +912,34 @@ mod tests {
             frame: frame.clone(),
             transform: ClipTransform::default(),
             effects: vec![],
+            mask: None,
             transition: None,
         }];
-        let cpu = c.composite(&layers).unwrap();
-        c.compose_to_texture(&[ComposeLayer {
-            frame,
-            transform: ClipTransform::default(),
-            effects: vec![],
-            transition: None,
-        }])
+        let cpu = c.composite(&[], &layers).unwrap();
+        c.compose_to_texture(
+            &[],
+            &[ComposeLayer {
+                frame,
+                transform: ClipTransform::default(),
+                effects: vec![],
+                mask: None,
+                transition: None,
+            }],
+        )
         .unwrap();
         // Re-read via composite of the same content to prove the GPU path doesn't diverge
         // structurally — the texture path skips map_read, so we re-composite once for assert.
         let cpu2 = c
-            .composite(&[ComposeLayer {
-                frame: solid_frame(16, 16, 40, 80, 120),
-                transform: ClipTransform::default(),
-                effects: vec![],
-                transition: None,
-            }])
+            .composite(
+                &[],
+                &[ComposeLayer {
+                    frame: solid_frame(16, 16, 40, 80, 120),
+                    transform: ClipTransform::default(),
+                    effects: vec![],
+                    mask: None,
+                    transition: None,
+                }],
+            )
             .unwrap();
         assert_eq!(cpu, cpu2);
         assert!(!cpu.iter().all(|&b| b == 0));
@@ -913,23 +954,31 @@ mod tests {
         };
         let frame = solid_frame(32, 32, 128, 128, 128);
         let base = c
-            .composite(&[ComposeLayer {
-                frame: frame.clone(),
-                transform: ClipTransform::default(),
-                effects: vec![],
-                transition: None,
-            }])
+            .composite(
+                &[],
+                &[ComposeLayer {
+                    frame: frame.clone(),
+                    transform: ClipTransform::default(),
+                    effects: vec![],
+                    mask: None,
+                    transition: None,
+                }],
+            )
             .unwrap();
         let bright = c
-            .composite(&[ComposeLayer {
-                frame,
-                transform: ClipTransform::default(),
-                effects: vec![effect(
-                    "builtin:color_adjust",
-                    [("exposure".into(), 1.0)].into_iter().collect(),
-                )],
-                transition: None,
-            }])
+            .composite(
+                &[],
+                &[ComposeLayer {
+                    frame,
+                    transform: ClipTransform::default(),
+                    effects: vec![effect(
+                        "builtin:color_adjust",
+                        [("exposure".into(), 1.0)].into_iter().collect(),
+                    )],
+                    mask: None,
+                    transition: None,
+                }],
+            )
             .unwrap();
         assert!(
             mean_luma(&bright) > mean_luma(&base) + 10.0,
@@ -948,20 +997,28 @@ mod tests {
         };
         let frame = solid_frame(16, 16, 40, 80, 120);
         let identity = c
-            .composite(&[ComposeLayer {
-                frame: frame.clone(),
-                transform: ClipTransform::default(),
-                effects: vec![],
-                transition: None,
-            }])
+            .composite(
+                &[],
+                &[ComposeLayer {
+                    frame: frame.clone(),
+                    transform: ClipTransform::default(),
+                    effects: vec![],
+                    mask: None,
+                    transition: None,
+                }],
+            )
             .unwrap();
         let empty_chain = c
-            .composite(&[ComposeLayer {
-                frame: frame.clone(),
-                transform: ClipTransform::default(),
-                effects: vec![],
-                transition: None,
-            }])
+            .composite(
+                &[],
+                &[ComposeLayer {
+                    frame: frame.clone(),
+                    transform: ClipTransform::default(),
+                    effects: vec![],
+                    mask: None,
+                    transition: None,
+                }],
+            )
             .unwrap();
         assert_eq!(identity, empty_chain);
 
@@ -971,12 +1028,16 @@ mod tests {
         );
         disabled.enabled = false;
         let disabled_out = c
-            .composite(&[ComposeLayer {
-                frame,
-                transform: ClipTransform::default(),
-                effects: vec![disabled],
-                transition: None,
-            }])
+            .composite(
+                &[],
+                &[ComposeLayer {
+                    frame,
+                    transform: ClipTransform::default(),
+                    effects: vec![disabled],
+                    mask: None,
+                    transition: None,
+                }],
+            )
             .unwrap();
         assert_eq!(identity, disabled_out);
     }
@@ -990,23 +1051,31 @@ mod tests {
         };
         let frame = solid_frame(16, 16, 200, 100, 50);
         let identity = c
-            .composite(&[ComposeLayer {
-                frame: frame.clone(),
-                transform: ClipTransform::default(),
-                effects: vec![],
-                transition: None,
-            }])
+            .composite(
+                &[],
+                &[ComposeLayer {
+                    frame: frame.clone(),
+                    transform: ClipTransform::default(),
+                    effects: vec![],
+                    mask: None,
+                    transition: None,
+                }],
+            )
             .unwrap();
         let blurred = c
-            .composite(&[ComposeLayer {
-                frame,
-                transform: ClipTransform::default(),
-                effects: vec![effect(
-                    "builtin:blur",
-                    [("radius".into(), 0.0)].into_iter().collect(),
-                )],
-                transition: None,
-            }])
+            .composite(
+                &[],
+                &[ComposeLayer {
+                    frame,
+                    transform: ClipTransform::default(),
+                    effects: vec![effect(
+                        "builtin:blur",
+                        [("radius".into(), 0.0)].into_iter().collect(),
+                    )],
+                    mask: None,
+                    transition: None,
+                }],
+            )
             .unwrap();
         // radius 0 skips the blur passes entirely → bit-exact identity.
         assert_eq!(identity, blurred);

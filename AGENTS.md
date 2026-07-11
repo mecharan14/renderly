@@ -48,10 +48,16 @@ renderly-core/     headless Rust engine: project model, command API, media I/O,
                    and docs/command-api.md as its contract.
 renderly-cli/      thin binary: load/apply-commands/save/export via renderly-core. Used for
                    scripting, testing, and as the simplest possible agent-drivable surface.
-renderly-mcp/      MCP server exposing renderly-core commands + perception tools over stdio/HTTP.
+renderly-mcp/      MCP server exposing renderly-core commands + perception tools over stdio.
+                   When the desktop app is running on the same project it proxies edits and
+                   perception to the app's loopback WebSocket bridge (docs/bridge-protocol.md);
+                   otherwise it operates headlessly on the project file.
 renderly-app/      Tauri 2 desktop app. Rust backend calls renderly-core; frontend (src/) is
                    the webview UI chrome; native preview surface is separate from the webview.
-docs/              specs that are the source of truth: schema, command API, architecture.
+                   src-tauri/src/bridge.rs hosts the live-agent bridge (loopback-only, token
+                   auth); agent edits share the app's undo history.
+docs/              specs that are the source of truth: schema, command API, architecture,
+                   bridge protocol, design system (docs/design-system.md).
 PLAN.md            product vision, roadmap, tech stack rationale. Not a spec — read docs/ for that.
 AGENTS.md          this file.
 ```

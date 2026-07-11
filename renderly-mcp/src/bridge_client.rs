@@ -198,3 +198,70 @@ pub struct EditorStatusHeadless {
     pub playhead: Option<f64>,
     pub selection: Option<Value>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovery_parses_with_and_without_project_path() {
+        let full: BridgeDiscovery = serde_json::from_str(
+            r#"{"pid":123,"port":4567,"token":"abc","project_path":"C:/p.renderly.json"}"#,
+        )
+        .unwrap();
+        assert_eq!(full.pid, 123);
+        assert_eq!(full.port, 4567);
+        assert_eq!(full.project_path.as_deref(), Some("C:/p.renderly.json"));
+
+        let bare: BridgeDiscovery =
+            serde_json::from_str(r#"{"pid":1,"port":2,"token":"t"}"#).unwrap();
+        assert!(bare.project_path.is_none());
+    }
+
+    #[test]
+    fn discovery_matches_project_requires_same_canonical_path() {
+        let dir = std::env::temp_dir();
+        let file = dir.join(format!(
+            "renderly-mcp-disc-{}.renderly.json",
+            std::process::id()
+        ));
+        std::fs::write(&file, "{}").unwrap();
+
+        let matching = BridgeDiscovery {
+            pid: 1,
+            port: 1,
+            token: String::new(),
+            project_path: Some(file.to_string_lossy().into_owned()),
+        };
+        assert!(discovery_matches_project(&matching, &file));
+
+        let other = BridgeDiscovery {
+            pid: 1,
+            port: 1,
+            token: String::new(),
+            project_path: Some(
+                dir.join("other.renderly.json")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        };
+        assert!(!discovery_matches_project(&other, &file));
+
+        let none = BridgeDiscovery {
+            pid: 1,
+            port: 1,
+            token: String::new(),
+            project_path: None,
+        };
+        assert!(!discovery_matches_project(&none, &file));
+
+        std::fs::remove_file(&file).ok();
+    }
+
+    #[test]
+    fn pid_liveness_sanity() {
+        assert!(!pid_alive(0));
+        // Our own pid is definitionally alive.
+        assert!(pid_alive(std::process::id()));
+    }
+}

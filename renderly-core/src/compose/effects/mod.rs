@@ -4,8 +4,9 @@
 //! draw. Unknown `effect_id`s are rejected at command validation; this module only
 //! executes the locked builtins below.
 
-use crate::project::EffectInstance;
-use std::collections::BTreeMap;
+use crate::packs::{cube_lut_upload_bytes, find_cube_lut, parse_pack_lut_id, LoadedPack};
+use crate::project::{ClipMask, ClipMaskKind, EffectInstance};
+use std::collections::{BTreeMap, HashMap};
 use wgpu::util::DeviceExt;
 
 use super::ComposeError;
@@ -82,8 +83,19 @@ fn param_or(params: &BTreeMap<String, f64>, key: &str, default: f64) -> f64 {
     params.get(key).copied().unwrap_or(default)
 }
 
-fn has_enabled_effects(effects: &[EffectInstance]) -> bool {
-    effects.iter().any(|e| e.enabled)
+fn has_enabled_effects(effects: &[EffectInstance], packs: &[LoadedPack]) -> bool {
+    effects.iter().any(|e| {
+        if !e.enabled {
+            return false;
+        }
+        if is_builtin_effect_id(&e.effect_id) {
+            return true;
+        }
+        if let Some((pack_id, lut_id)) = parse_pack_lut_id(&e.effect_id) {
+            return find_cube_lut(packs, pack_id, lut_id).is_some();
+        }
+        false
+    })
 }
 
 #[repr(C)]
@@ -121,11 +133,47 @@ struct GlitchUniform {
     _pad: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PackLutUniform {
+    intensity: f32,
+    lut_size: f32,
+    _pad0: f32,
+    _pad1: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ChromaKeyUniform {
+    key_rgb: [f32; 4],
+    tolerance: f32,
+    softness: f32,
+    _pad0: f32,
+    _pad1: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct MaskUniform {
+    bounds: [f32; 4],
+    feather: f32,
+    invert: f32,
+    mode: u32,
+    _pad0: f32,
+}
+
 enum EffectKind {
     ColorAdjust,
     Blur,
     Lut,
     Glitch,
+    ChromaKey,
+}
+
+struct PackLutGpu {
+    size: u32,
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
 }
 
 struct PingPongRt {
@@ -140,10 +188,18 @@ struct PingPongRt {
 pub struct EffectProcessor {
     sampler: wgpu::Sampler,
     bind_group_layout: wgpu::BindGroupLayout,
+    pack_lut_bind_group_layout: wgpu::BindGroupLayout,
+    mask_bind_group_layout: wgpu::BindGroupLayout,
     color_adjust_pipeline: wgpu::RenderPipeline,
     blur_pipeline: wgpu::RenderPipeline,
     lut_pipeline: wgpu::RenderPipeline,
     glitch_pipeline: wgpu::RenderPipeline,
+    chroma_key_pipeline: wgpu::RenderPipeline,
+    pack_lut_pipeline: wgpu::RenderPipeline,
+    mask_pipeline: wgpu::RenderPipeline,
+    pack_lut_cache: HashMap<String, PackLutGpu>,
+    matte_cache: HashMap<String, wgpu::TextureView>,
+    dummy_matte_view: Option<wgpu::TextureView>,
     ping: Option<PingPongRt>,
     pong: Option<PingPongRt>,
     /// After a successful write, index of the RT holding the result (0=ping, 1=pong).
@@ -194,9 +250,120 @@ impl EffectProcessor {
             ],
         });
 
+        let pack_lut_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("pack-lut-effect"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("effect"),
             bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let pack_lut_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("pack-lut-effect"),
+                bind_group_layouts: &[Some(&pack_lut_bind_group_layout)],
+                immediate_size: 0,
+            });
+
+        let mask_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("mask-effect"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let mask_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mask-effect"),
+            bind_group_layouts: &[Some(&mask_bind_group_layout)],
             immediate_size: 0,
         });
 
@@ -216,14 +383,40 @@ impl EffectProcessor {
             "glitch",
             include_str!("glitch.wgsl"),
         );
+        let chroma_key_pipeline = make_effect_pipeline(
+            device,
+            &pipeline_layout,
+            "chroma_key",
+            include_str!("chroma_key.wgsl"),
+        );
+        let pack_lut_pipeline = make_effect_pipeline(
+            device,
+            &pack_lut_pipeline_layout,
+            "pack_lut",
+            include_str!("pack_lut.wgsl"),
+        );
+        let mask_pipeline = make_effect_pipeline(
+            device,
+            &mask_pipeline_layout,
+            "mask",
+            include_str!("mask.wgsl"),
+        );
 
         Self {
             sampler,
             bind_group_layout,
+            pack_lut_bind_group_layout,
+            mask_bind_group_layout,
             color_adjust_pipeline,
             blur_pipeline,
             lut_pipeline,
             glitch_pipeline,
+            chroma_key_pipeline,
+            pack_lut_pipeline,
+            mask_pipeline,
+            pack_lut_cache: HashMap::new(),
+            matte_cache: HashMap::new(),
+            dummy_matte_view: None,
             ping: None,
             pong: None,
             result_slot: 0,
@@ -253,16 +446,20 @@ impl EffectProcessor {
 
     /// Run enabled effects on `src_view` into ping-pong RTs. Returns `false` when nothing
     /// was written (caller keeps using `src_view`).
+    #[allow(clippy::too_many_arguments)]
     pub fn apply(
         &mut self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         src_view: &wgpu::TextureView,
         width: u32,
         height: u32,
         effects: &[EffectInstance],
+        mask: Option<&ClipMask>,
+        packs: &[LoadedPack],
     ) -> Result<bool, ComposeError> {
-        if !has_enabled_effects(effects) {
+        if !has_enabled_effects(effects, packs) && mask.map(|m| !m.enabled).unwrap_or(true) {
             return Ok(false);
         }
 
@@ -375,11 +572,450 @@ impl EffectProcessor {
                     read_src = false;
                     wrote = true;
                 }
+                "builtin:chroma_key" => {
+                    let u = ChromaKeyUniform {
+                        key_rgb: [
+                            param_or(&effect.params, "key_r", 0.0) as f32,
+                            param_or(&effect.params, "key_g", 1.0) as f32,
+                            param_or(&effect.params, "key_b", 0.0) as f32,
+                            0.0,
+                        ],
+                        tolerance: param_or(&effect.params, "tolerance", 0.3) as f32,
+                        softness: param_or(&effect.params, "softness", 0.1) as f32,
+                        _pad0: 0.0,
+                        _pad1: 0.0,
+                    };
+                    self.draw_pass(
+                        device,
+                        encoder,
+                        src_view,
+                        read_src,
+                        EffectKind::ChromaKey,
+                        bytemuck::bytes_of(&u),
+                    )?;
+                    read_src = false;
+                    wrote = true;
+                }
+                id if parse_pack_lut_id(id).is_some() => {
+                    let intensity = param_or(&effect.params, "intensity", 1.0) as f32;
+                    if intensity <= 0.0 {
+                        continue;
+                    }
+                    let Some((pack_id, lut_id)) = parse_pack_lut_id(id) else {
+                        continue;
+                    };
+                    let Some(cube) = find_cube_lut(packs, pack_id, lut_id) else {
+                        continue;
+                    };
+                    self.ensure_pack_lut_gpu(device, queue, id, cube)?;
+                    let lut_view = self
+                        .pack_lut_cache
+                        .get(id)
+                        .expect("pack lut cache")
+                        .view
+                        .clone();
+                    let u = PackLutUniform {
+                        intensity,
+                        lut_size: cube.size as f32,
+                        _pad0: 0.0,
+                        _pad1: 0.0,
+                    };
+                    self.draw_pack_lut_pass(
+                        device,
+                        encoder,
+                        src_view,
+                        read_src,
+                        &lut_view,
+                        bytemuck::bytes_of(&u),
+                    )?;
+                    read_src = false;
+                    wrote = true;
+                }
                 _ => continue,
             }
         }
 
+        if let Some(mask) = mask.filter(|m| m.enabled) {
+            let u = match &mask.kind {
+                ClipMaskKind::None => MaskUniform {
+                    bounds: [0.0; 4],
+                    feather: 0.0,
+                    invert: 0.0,
+                    mode: 0,
+                    _pad0: 0.0,
+                },
+                ClipMaskKind::Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => MaskUniform {
+                    bounds: [*x as f32, *y as f32, *width as f32, *height as f32],
+                    feather: mask.feather as f32,
+                    invert: if mask.invert { 1.0 } else { 0.0 },
+                    mode: 0,
+                    _pad0: 0.0,
+                },
+                ClipMaskKind::Ellipse { cx, cy, rx, ry } => MaskUniform {
+                    bounds: [*cx as f32, *cy as f32, *rx as f32, *ry as f32],
+                    feather: mask.feather as f32,
+                    invert: if mask.invert { 1.0 } else { 0.0 },
+                    mode: 1,
+                    _pad0: 0.0,
+                },
+                ClipMaskKind::Raster { .. }
+                | ClipMaskKind::Generated { .. }
+                | ClipMaskKind::Luma { .. } => MaskUniform {
+                    bounds: [0.0; 4],
+                    feather: mask.feather as f32,
+                    invert: if mask.invert { 1.0 } else { 0.0 },
+                    mode: 2,
+                    _pad0: 0.0,
+                },
+            };
+
+            let matte_view = if u.mode == 2 {
+                self.ensure_matte_view(device, queue, &mask.kind)?
+            } else {
+                self.ensure_dummy_matte(device, queue)?
+            };
+
+            self.draw_mask_pass(
+                device,
+                encoder,
+                src_view,
+                read_src,
+                &matte_view,
+                bytemuck::bytes_of(&u),
+            )?;
+            wrote = true;
+        }
+
         Ok(wrote)
+    }
+
+    fn ensure_matte_view(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        kind: &ClipMaskKind,
+    ) -> Result<wgpu::TextureView, ComposeError> {
+        let cache_key = match kind {
+            ClipMaskKind::Raster { path } => format!("raster:{}", path.display()),
+            ClipMaskKind::Generated { cache_dir } => format!("gen:{}", cache_dir.display()),
+            ClipMaskKind::Luma { .. } => "luma:live".to_string(), // Don't cache live heuristic mattes
+            _ => return Err(ComposeError::Wgpu("not a texture mask".into())),
+        };
+
+        if let Some(view) = self.matte_cache.get(&cache_key) {
+            if cache_key != "luma:live" {
+                return Ok(view.clone());
+            }
+        }
+
+        let (pixels, width, height) = match kind {
+            ClipMaskKind::Raster { path } => {
+                let img = image::open(path).map_err(|e| ComposeError::Wgpu(e.to_string()))?;
+                let gray = img.to_luma8();
+                let w = gray.width();
+                let h = gray.height();
+                (gray.into_raw(), w, h)
+            }
+            ClipMaskKind::Generated { cache_dir } => {
+                let path = cache_dir.join("matte.png");
+                let img = image::open(path).map_err(|e| ComposeError::Wgpu(e.to_string()))?;
+                let gray = img.to_luma8();
+                let w = gray.width();
+                let h = gray.height();
+                (gray.into_raw(), w, h)
+            }
+            ClipMaskKind::Luma {
+                pixels,
+                width,
+                height,
+            } => (pixels.clone(), *width, *height),
+            _ => unreachable!(),
+        };
+
+        let texture = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("matte"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &pixels,
+        );
+        let view = texture.create_view(&Default::default());
+        if cache_key != "luma:live" {
+            self.matte_cache.insert(cache_key, view.clone());
+        }
+        Ok(view)
+    }
+
+    fn ensure_dummy_matte(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<wgpu::TextureView, ComposeError> {
+        if let Some(view) = &self.dummy_matte_view {
+            return Ok(view.clone());
+        }
+        let texture = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("dummy-matte"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &[255u8],
+        );
+        let view = texture.create_view(&Default::default());
+        self.dummy_matte_view = Some(view.clone());
+        Ok(view)
+    }
+
+    fn draw_mask_pass(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        src_view: &wgpu::TextureView,
+        read_src: bool,
+        matte_view: &wgpu::TextureView,
+        uniform_bytes: &[u8],
+    ) -> Result<(), ComposeError> {
+        let dest_slot = if read_src { 0u8 } else { 1 - self.result_slot };
+
+        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mask-params"),
+            contents: uniform_bytes,
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+        let input_is_src = read_src;
+        let input_slot = self.result_slot;
+
+        let bind_group = {
+            let input_view = if input_is_src {
+                src_view
+            } else if input_slot == 0 {
+                &self.ping.as_ref().unwrap().view
+            } else {
+                &self.pong.as_ref().unwrap().view
+            };
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("mask-bind"),
+                layout: &self.mask_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(input_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: params_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(matte_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            })
+        };
+
+        let dest_view = if dest_slot == 0 {
+            &self.ping.as_ref().unwrap().view
+        } else {
+            &self.pong.as_ref().unwrap().view
+        };
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("mask-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: dest_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.mask_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..6, 0..1);
+        }
+
+        self.result_slot = dest_slot;
+        Ok(())
+    }
+
+    fn ensure_pack_lut_gpu(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        effect_id: &str,
+        cube: &crate::packs::CubeLut,
+    ) -> Result<(), ComposeError> {
+        let size = cube.size as u32;
+        let needs_upload = self
+            .pack_lut_cache
+            .get(effect_id)
+            .map(|e| e.size != size)
+            .unwrap_or(true);
+        if needs_upload {
+            let bytes = cube_lut_upload_bytes(cube);
+            let texture = device.create_texture_with_data(
+                queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("pack-lut-3d"),
+                    size: wgpu::Extent3d {
+                        width: size,
+                        height: size,
+                        depth_or_array_layers: size,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D3,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                &bytes,
+            );
+            let view = texture.create_view(&Default::default());
+            self.pack_lut_cache.insert(
+                effect_id.to_string(),
+                PackLutGpu {
+                    size,
+                    _texture: texture,
+                    view,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn draw_pack_lut_pass(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        src_view: &wgpu::TextureView,
+        read_src: bool,
+        lut_view: &wgpu::TextureView,
+        uniform_bytes: &[u8],
+    ) -> Result<(), ComposeError> {
+        let dest_slot = if read_src { 0u8 } else { 1 - self.result_slot };
+
+        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("pack-lut-params"),
+            contents: uniform_bytes,
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+        let input_is_src = read_src;
+        let input_slot = self.result_slot;
+
+        let bind_group = {
+            let input_view = if input_is_src {
+                src_view
+            } else if input_slot == 0 {
+                &self.ping.as_ref().unwrap().view
+            } else {
+                &self.pong.as_ref().unwrap().view
+            };
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("pack-lut-bind"),
+                layout: &self.pack_lut_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(input_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: params_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(lut_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            })
+        };
+
+        let dest_view = if dest_slot == 0 {
+            &self.ping.as_ref().unwrap().view
+        } else {
+            &self.pong.as_ref().unwrap().view
+        };
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("pack-lut-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: dest_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pack_lut_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..6, 0..1);
+        }
+
+        self.result_slot = dest_slot;
+        Ok(())
     }
 
     fn draw_pass(
@@ -407,6 +1043,7 @@ impl EffectProcessor {
             EffectKind::Blur => &self.blur_pipeline,
             EffectKind::Lut => &self.lut_pipeline,
             EffectKind::Glitch => &self.glitch_pipeline,
+            EffectKind::ChromaKey => &self.chroma_key_pipeline,
         };
 
         let bind_group = {

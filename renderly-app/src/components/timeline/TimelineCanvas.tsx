@@ -3,7 +3,9 @@ import { useEditorStore } from "../../store/editorStore";
 import { renderTimeline, renderTimelineOverlay } from "../../timeline/renderer";
 import { useTimelineInteractions } from "../../timeline/interactions";
 import { readMediaDrag } from "../../lib/dragMedia";
-import { hitTestClip, secsFromCanvasX, trackIndexAtY } from "../../timeline/layout";
+import { readTransitionDrag, transitionFromPayload } from "../../lib/dragTransition";
+import { setClipTransition } from "../../lib/commands";
+import { hitTestClip, hitTestTransitionJunction, secsFromCanvasX, trackIndexAtY } from "../../timeline/layout";
 import { snapTime } from "../../timeline/snap";
 
 function currentRenderState() {
@@ -17,6 +19,7 @@ function currentRenderState() {
     scrollX: s.scrollX,
     scrollY: s.scrollY,
     dragGhost: s.dragGhost,
+    transitionDropTarget: s.transitionDropTarget,
     snapGuideSecs: s.snapGuideSecs,
     mediaAssets: s.mediaAssets,
   };
@@ -45,11 +48,14 @@ export function TimelineCanvas() {
   const scrollY = useEditorStore((s) => s.scrollY);
   const toolMode = useEditorStore((s) => s.toolMode);
   const dragGhost = useEditorStore((s) => s.dragGhost);
+  const transitionDropTarget = useEditorStore((s) => s.transitionDropTarget);
   const snapGuideSecs = useEditorStore((s) => s.snapGuideSecs);
   const mediaAssets = useEditorStore((s) => s.mediaAssets);
   const themeEpoch = useEditorStore((s) => s.themeEpoch);
   const snapEnabled = useEditorStore((s) => s.snapEnabled);
   const setDragGhost = useEditorStore((s) => s.setDragGhost);
+  const setTransitionDropTarget = useEditorStore((s) => s.setTransitionDropTarget);
+  const dispatch = useEditorStore((s) => s.dispatch);
   const dropMediaOnTimeline = useEditorStore((s) => s.dropMediaOnTimeline);
   const openContextMenu = useEditorStore((s) => s.openContextMenu);
 
@@ -71,10 +77,11 @@ export function TimelineCanvas() {
       scrollX,
       scrollY,
       dragGhost,
+      transitionDropTarget,
       snapGuideSecs,
       mediaAssets,
     });
-  }, [project, selection, selections, pxPerSec, scrollX, scrollY, dragGhost, mediaAssets, themeEpoch]);
+  }, [project, selection, selections, pxPerSec, scrollX, scrollY, dragGhost, transitionDropTarget, mediaAssets, themeEpoch]);
 
   // Transient overlay repaint: playhead + snap guide only.
   useEffect(() => {
@@ -108,10 +115,39 @@ export function TimelineCanvas() {
         id="timeline"
         className={toolMode === "razor" ? "razor-mode" : ""}
         onDragOver={(e) => {
+          const transitionPayload = readTransitionDrag(e);
+          if (transitionPayload && project) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "copy";
+            setDragGhost(null);
+
+            const rect = e.currentTarget.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            const hit = hitTestTransitionJunction(
+              project,
+              x,
+              y,
+              rect.height,
+              pxPerSec,
+              scrollX,
+              scrollY,
+            );
+            if (!hit) {
+              setTransitionDropTarget(null);
+              return;
+            }
+            const track = project.tracks.find((t) => t.id === hit.trackId);
+            const valid = !!track && track.kind === "video" && !track.locked;
+            setTransitionDropTarget({ trackId: hit.trackId, clipId: hit.clipId, valid });
+            return;
+          }
+
           const payload = readMediaDrag(e);
           if (!payload || !project) return;
           e.preventDefault();
           e.dataTransfer.dropEffect = "copy";
+          setTransitionDropTarget(null);
 
           const rect = e.currentTarget.getBoundingClientRect();
           const x = e.clientX - rect.left;
@@ -137,11 +173,40 @@ export function TimelineCanvas() {
             valid,
           });
         }}
-        onDragLeave={() => setDragGhost(null)}
+        onDragLeave={() => {
+          setDragGhost(null);
+          setTransitionDropTarget(null);
+        }}
         onDrop={(e) => {
+          const transitionPayload = readTransitionDrag(e);
+          if (transitionPayload && project) {
+            e.preventDefault();
+            const rect = e.currentTarget.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            const hit = hitTestTransitionJunction(
+              project,
+              x,
+              y,
+              rect.height,
+              pxPerSec,
+              scrollX,
+              scrollY,
+            );
+            setTransitionDropTarget(null);
+            if (!hit) return;
+            const track = project.tracks.find((t) => t.id === hit.trackId);
+            if (!track || track.kind !== "video" || track.locked) return;
+            void dispatch(
+              setClipTransition(hit.trackId, hit.clipId, transitionFromPayload(transitionPayload)),
+            );
+            return;
+          }
+
           const payload = readMediaDrag(e);
           if (!payload) return;
           e.preventDefault();
+          setTransitionDropTarget(null);
           void dropMediaOnTimeline();
         }}
         onContextMenu={(e) => {

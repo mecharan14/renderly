@@ -574,3 +574,108 @@ impl ServerHandler for RenderlyMcp {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_path(tag: &str) -> String {
+        std::env::temp_dir()
+            .join(format!(
+                "renderly-mcp-test-{tag}-{}.renderly.json",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// `with_live_or_headless` uses `block_in_place`, which must run on a multi-thread
+    /// runtime worker — spawn the sync body onto one. The session points at a temp path,
+    /// so even if a real desktop bridge is running on this machine the project-path check
+    /// keeps these tests headless.
+    fn on_worker(f: impl FnOnce() + Send + 'static) {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async { tokio::spawn(async move { f() }).await.unwrap() });
+    }
+
+    #[test]
+    fn new_project_writes_file_and_opens_session() {
+        let path = temp_path("new");
+        let mcp = RenderlyMcp::new();
+        let msg = mcp
+            .new_project_impl(NewProjectRequest {
+                path: path.clone(),
+                name: "test".into(),
+                width: 1920,
+                height: 1080,
+                fps: 30.0,
+            })
+            .unwrap();
+        assert!(msg.contains("created"));
+        let data = std::fs::read_to_string(&path).unwrap();
+        let project: Project = serde_json::from_str(&data).unwrap();
+        assert_eq!(project.name, "test");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn headless_apply_command_persists_to_disk() {
+        on_worker(|| {
+            let path = temp_path("apply");
+            let mcp = RenderlyMcp::new();
+            mcp.new_project_impl(NewProjectRequest {
+                path: path.clone(),
+                name: "test".into(),
+                width: 1280,
+                height: 720,
+                fps: 30.0,
+            })
+            .unwrap();
+
+            let outcome = mcp
+                .apply_command_impl(ApplyCommandRequest {
+                    command: serde_json::json!({
+                        "command": "AddTrack", "kind": "video", "name": "V1"
+                    }),
+                })
+                .unwrap();
+            assert!(!outcome.starts_with("error"));
+
+            // The edit must be saved back to the project file (headless contract).
+            let data = std::fs::read_to_string(&path).unwrap();
+            let project: Project = serde_json::from_str(&data).unwrap();
+            assert_eq!(project.tracks.len(), 1);
+            assert_eq!(project.tracks[0].name, "V1");
+
+            let shown = mcp.get_project_impl().unwrap();
+            assert!(shown.contains("\"V1\""));
+            std::fs::remove_file(&path).ok();
+        });
+    }
+
+    #[test]
+    fn apply_command_rejects_invalid_command_json() {
+        on_worker(|| {
+            let path = temp_path("invalid");
+            let mcp = RenderlyMcp::new();
+            mcp.new_project_impl(NewProjectRequest {
+                path: path.clone(),
+                name: "test".into(),
+                width: 1280,
+                height: 720,
+                fps: 30.0,
+            })
+            .unwrap();
+            let err = mcp
+                .apply_command_impl(ApplyCommandRequest {
+                    command: serde_json::json!({ "command": "NoSuchCommand" }),
+                })
+                .unwrap_err();
+            assert!(err.contains("invalid command JSON"));
+            std::fs::remove_file(&path).ok();
+        });
+    }
+}

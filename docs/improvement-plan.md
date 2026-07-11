@@ -109,7 +109,7 @@ Sprint 3:
 Sprint 4:
   B3 JSON-Patch deltas, E3 live perception, C2(full)/C3/C5, A8 hw encode, D2/D3
 Later:
-  A7 GPU effects, C4, C6, C7, light theme GA, ffmpeg-the-third migration
+  A7 GPU effects (Completed), C4 (Completed), C6 (Completed), C7 (Completed), light theme GA (Completed), ffmpeg-the-third migration
 ```
 
 Hard dependencies: A4→A7(preview benefit), C1→C6, D1→D3, E1→E3, B2→B3, BX2→C2.

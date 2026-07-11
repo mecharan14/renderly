@@ -162,3 +162,63 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_project_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "renderly-cli-test-{tag}-{}.renderly.json",
+            std::process::id()
+        ))
+    }
+
+    fn test_project() -> Project {
+        Project::new(
+            "cli test",
+            Settings {
+                fps: 30.0,
+                width: 1920,
+                height: 1080,
+                sample_rate: 48000,
+                duck_db: -12.0,
+            },
+        )
+    }
+
+    #[test]
+    fn save_load_round_trip_preserves_project() {
+        let path = temp_project_path("roundtrip");
+        let project = test_project();
+        save_project(&path, &project).unwrap();
+        let loaded = load_project(&path).unwrap();
+        assert_eq!(loaded.name, project.name);
+        assert_eq!(loaded.schema_version, project.schema_version);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn apply_command_json_matches_apply_subcommand_path() {
+        // Same deserialization the `apply` subcommand uses: JSON string -> Command.
+        let path = temp_project_path("apply");
+        let mut project = test_project();
+        let cmd: Command =
+            serde_json::from_str(r#"{"command":"AddTrack","kind":"video","name":"V1"}"#).unwrap();
+        apply_and_report(&mut project, cmd).unwrap();
+        assert_eq!(project.tracks.len(), 1);
+        assert_eq!(project.tracks[0].name, "V1");
+        save_project(&path, &project).unwrap();
+        let reloaded = load_project(&path).unwrap();
+        assert_eq!(reloaded.tracks.len(), 1);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn load_project_reports_bad_json() {
+        let path = temp_project_path("badjson");
+        std::fs::write(&path, "not json").unwrap();
+        assert!(load_project(&path).is_err());
+        std::fs::remove_file(&path).ok();
+    }
+}

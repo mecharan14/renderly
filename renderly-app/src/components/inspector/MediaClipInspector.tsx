@@ -26,6 +26,7 @@ import { MenuSelect } from "../ui/MenuSelect";
 import { Tooltip } from "../ui/Tooltip";
 import { KeyframeEditor } from "./KeyframeEditor";
 import { EffectList } from "../leftpanel/EffectsPanel";
+import { MulticamSection } from "./MulticamSection";
 import * as ipc from "../../lib/ipc";
 
 const AUDIO_ROLES: { value: TrackAudioRole | ""; label: string }[] = [
@@ -296,6 +297,10 @@ export function MediaClipInspector({ track, clip }: { track: Track; clip: MediaC
             </label>
           </div>
         </div>
+      )}
+
+      {showTransform && project && (
+        <MulticamSection project={project} clip={clip.type === "video" ? clip : null} />
       )}
 
       <details className="insp-disclosure">
