@@ -97,6 +97,7 @@ interface EditorStore {
   dispatchBatch(commands: Record<string, unknown>[], quiet?: boolean): Promise<boolean>;
   undo(): Promise<void>;
   redo(): Promise<void>;
+  pruneStaleSelection(): void;
 
   copySelection(): void;
   pasteAtPlayhead(): Promise<void>;
@@ -313,6 +314,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       const status = await ipc.undo();
       set({ canUndo: status.can_undo, canRedo: status.can_redo });
       await get().refetchProject();
+      get().pruneStaleSelection();
       await ipc.seek(get().playhead).catch(() => {});
     } catch (e) {
       console.warn("undo:", e);
@@ -324,10 +326,24 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       const status = await ipc.redo();
       set({ canUndo: status.can_undo, canRedo: status.can_redo });
       await get().refetchProject();
+      get().pruneStaleSelection();
       await ipc.seek(get().playhead).catch(() => {});
     } catch (e) {
       console.warn("redo:", e);
     }
+  },
+
+  pruneStaleSelection() {
+    // Undo/redo can restore a project where the selected clip no longer exists (its
+    // creation was undone, or a redo removed it again). Consumers mostly guard with
+    // optional chaining, but `splitSelectedAtPlayhead` doesn't — it would otherwise
+    // repeatedly dispatch SplitClip against a dead clip id, failing every time with a
+    // confusing toast and no visual cue that the selection is gone.
+    const { project, selection } = get();
+    if (!project || !selection) return;
+    const track = project.tracks.find((t) => t.id === selection.trackId);
+    const clip = track?.clips.find((c) => c.id === selection.clipId);
+    if (!track || !clip) set({ selection: null });
   },
 
   copySelection() {

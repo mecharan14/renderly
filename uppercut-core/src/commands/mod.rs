@@ -1621,6 +1621,110 @@ mod tests {
     }
 
     #[test]
+    fn move_clip_repositions_within_same_track_and_across_tracks() {
+        let dir = std::env::temp_dir().join(format!("uppercut-test-{}", Id::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav_path = write_temp_wav(&dir, "clip.wav", 10.0);
+
+        let mut project = test_project();
+        let media_id = match apply_command(
+            &mut project,
+            Command::ImportMedia {
+                path: wav_path.to_string_lossy().to_string(),
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::MediaImported { media_id } => media_id,
+            _ => unreachable!(),
+        };
+        let track_a = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Audio,
+                name: "A1".into(),
+                id: None,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        let track_b = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Audio,
+                name: "A2".into(),
+                id: None,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        let clip_id = match apply_command(
+            &mut project,
+            Command::AddClip {
+                track_id: track_a,
+                media_id,
+                position_secs: 0.0,
+                source_in_secs: 0.0,
+                source_out_secs: 2.0,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::ClipAdded { clip_id } => clip_id,
+            _ => unreachable!(),
+        };
+
+        // Reposition within the same track.
+        apply_command(
+            &mut project,
+            Command::MoveClip {
+                track_id: track_a,
+                clip_id,
+                new_position_secs: 5.0,
+                new_track_id: None,
+            },
+        )
+        .unwrap();
+        let clip = project
+            .find_track(track_a)
+            .unwrap()
+            .find_clip(clip_id)
+            .unwrap();
+        assert!((clip.position_secs() - 5.0).abs() < 1e-9);
+
+        // Move to a different (kind-compatible) track.
+        apply_command(
+            &mut project,
+            Command::MoveClip {
+                track_id: track_a,
+                clip_id,
+                new_position_secs: 1.0,
+                new_track_id: Some(track_b),
+            },
+        )
+        .unwrap();
+        assert!(project
+            .find_track(track_a)
+            .unwrap()
+            .find_clip(clip_id)
+            .is_none());
+        let moved = project
+            .find_track(track_b)
+            .unwrap()
+            .find_clip(clip_id)
+            .unwrap();
+        assert!((moved.position_secs() - 1.0).abs() < 1e-9);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn generate_captions_requires_caption_track() {
         let mut project = test_project();
         let media_id = uuid::Uuid::new_v4();
@@ -1658,6 +1762,108 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, CommandError::TrackKindMismatch(_, _, _)));
+    }
+
+    #[test]
+    fn set_audio_gain_on_audio_clip_and_rejects_non_audio() {
+        let mut project = test_project();
+        let media_id = uuid::Uuid::new_v4();
+        project.media.push(crate::project::MediaItem {
+            id: media_id,
+            path: "voice.wav".into(),
+            kind: crate::project::MediaKind::Audio,
+            duration_secs: Some(5.0),
+            width: None,
+            height: None,
+            fps: None,
+        });
+        let track_id = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Audio,
+                name: "A1".into(),
+                id: None,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        let clip_id = match apply_command(
+            &mut project,
+            Command::AddClip {
+                track_id,
+                media_id,
+                position_secs: 0.0,
+                source_in_secs: 0.0,
+                source_out_secs: 5.0,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::ClipAdded { clip_id } => clip_id,
+            _ => unreachable!(),
+        };
+
+        apply_command(
+            &mut project,
+            Command::SetAudioGain {
+                track_id,
+                clip_id,
+                gain_db: -6.0,
+            },
+        )
+        .unwrap();
+        let clip = project
+            .find_track(track_id)
+            .unwrap()
+            .find_clip(clip_id)
+            .unwrap();
+        match clip {
+            Clip::Audio(c) => assert!((c.gain_db - -6.0).abs() < 1e-9),
+            _ => panic!("expected audio clip"),
+        }
+
+        // A caption clip has no audio.
+        let caption_track = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Caption,
+                name: "C1".into(),
+                id: None,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        let caption_clip_id = match apply_command(
+            &mut project,
+            Command::AddCaption {
+                track_id: caption_track,
+                text: "hi".into(),
+                position_secs: 0.0,
+                duration_secs: 1.0,
+                style_id: "tiktok-bold-yellow".into(),
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::ClipAdded { clip_id } => clip_id,
+            _ => unreachable!(),
+        };
+        let err = apply_command(
+            &mut project,
+            Command::SetAudioGain {
+                track_id: caption_track,
+                clip_id: caption_clip_id,
+                gain_db: -6.0,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::NoAudio(_)));
     }
 
     #[test]

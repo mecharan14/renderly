@@ -64,7 +64,10 @@ export function snapTime(
 
 export function trackLayout(h: number, trackCount: number) {
   const usable = h - RULER_H - 8;
-  const trackH = Math.min(52, usable / Math.max(trackCount, 1));
+  // Clamp to a minimum: `usable` can go negative when the canvas is shorter than
+  // RULER_H + 8 (e.g. mid panel-resize), which without a floor produced a negative
+  // trackH and degenerate/mirrored clip rectangles in renderer.ts.
+  const trackH = Math.max(8, Math.min(52, usable / Math.max(trackCount, 1)));
   return { trackH, laneTop: (i: number) => RULER_H + 4 + i * (trackH + 6) };
 }
 

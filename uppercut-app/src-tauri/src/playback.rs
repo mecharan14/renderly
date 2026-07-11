@@ -250,6 +250,17 @@ impl PlaybackEngine {
     }
 }
 
+/// Removes its directory on drop — covers every exit path from the scope it's declared
+/// in (early `return`, `continue 'restart`, *and* a panic unwinding through), unlike a
+/// manual `remove_dir_all` call repeated at each individual exit point.
+struct TempDirGuard(std::path::PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_playback_loop(
     app: AppHandle,
@@ -311,6 +322,10 @@ fn run_playback_loop(
         let audio_dir =
             std::env::temp_dir().join(format!("uppercut-playback-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&audio_dir);
+        // RAII cleanup instead of a manual `remove_dir_all` at every exit point below: it
+        // also covers a panic unwinding through this scope (e.g. a wgpu validation panic
+        // inside `renderer.render`), which none of the manual call sites could.
+        let _audio_dir_guard = TempDirGuard(audio_dir.clone());
         let audio_wav = audio_dir.join("audio.wav");
         let has_audio = match mix_timeline_audio_range_to_file(
             &project,
@@ -346,16 +361,22 @@ fn run_playback_loop(
                 if let Some(sink) = &sink {
                     sink.stop();
                 }
-                std::fs::remove_dir_all(&audio_dir).ok();
                 finish(*current_time.lock());
                 return;
             }
 
-            if let Some(new_time) = seek.lock().take() {
+            // `seek.lock()` as its own statement, NOT the `if let` scrutinee directly —
+            // same reasoning as `stop()`/`pause()`'s identically-shaped fix above: an
+            // if-let scrutinee's temporary is extended to live for the whole block, which
+            // would hold this `MutexGuard` across `sink.stop()`/`app.emit` (blocking I/O)
+            // for no reason. Milder than the original bug (no reverse-lock-order deadlock
+            // here — confirmed no other holder of `seek` ever tries to reacquire anything
+            // this loop holds) but the same footgun shape.
+            let pending_seek = seek.lock().take();
+            if let Some(new_time) = pending_seek {
                 if let Some(sink) = &sink {
                     sink.stop();
                 }
-                std::fs::remove_dir_all(&audio_dir).ok();
                 start_secs = new_time.clamp(0.0, duration.max(0.0));
                 let _ = app.emit(
                     "playback:tick",
@@ -380,7 +401,6 @@ fn run_playback_loop(
                 if let Some(sink) = &sink {
                     sink.stop();
                 }
-                std::fs::remove_dir_all(&audio_dir).ok();
                 finish(duration.max(0.0));
                 return;
             }
