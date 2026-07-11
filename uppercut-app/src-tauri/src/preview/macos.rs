@@ -172,7 +172,9 @@ fn ensure_child_view(
     }
 
     let allocated = PreviewView::alloc(mtm);
-    let child: Retained<PreviewView> = unsafe { msg_send![super(allocated), initWithFrame: frame] };
+    // DefinedClass subclasses must set ivars before calling a superclass init via `super`.
+    let child: Retained<PreviewView> =
+        unsafe { msg_send![super(allocated.set_ivars(())), initWithFrame: frame] };
     child.setWantsLayer(true);
     child.setAutoresizingMask(NSAutoresizingMaskOptions::ViewNotSizable);
     parent_view.addSubview(&child);
