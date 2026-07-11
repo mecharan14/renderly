@@ -1,0 +1,62 @@
+/* Design tokens — teal accent (CapCut-adjacent hue). Timeline canvas colors must read
+   these via timeline/theme.ts, never hardcode hex — see docs/architecture.md. */
+:root {
+  color-scheme: dark;
+
+  --bg-0: #0d0d0f;
+  --bg-1: #131316;
+  --bg-2: #1b1b1f;
+  --bg-3: #232329;
+  --border: #2a2a31;
+  --border-strong: #3a3a44;
+
+  --text-1: #f2f2f5;
+  --text-2: #a2a2ad;
+  --text-3: #6b6b76;
+
+  --accent: #00d1c7;
+  --accent-hover: #33dcd4;
+  --accent-active: #00b0a7;
+  --accent-soft: rgba(0, 209, 199, 0.15);
+  --on-accent: #03211f;
+
+  --danger: #ff5c5c;
+  --danger-soft: rgba(255, 92, 92, 0.15);
+  --warning: #ffb547;
+  --success: #4ade80;
+
+  --clip-video-bg: #26303d;
+  --clip-audio-bg: #0e4f4a;
+  --clip-audio-wave: #35e0d2;
+  --clip-caption-bg: #5b45c9;
+  --clip-border-selected: var(--accent);
+
+  --playhead: #ffffff;
+  --snap-guide: var(--accent);
+  --ruler-text: var(--text-3);
+  --ruler-bg: #12141a;
+  --timeline-bg: #0c0d12;
+  --track-header-bg: #16181f;
+  --track-lane-bg: #12141a;
+
+  --radius-s: 4px;
+  --radius-m: 6px;
+  --radius-l: 10px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+
+  --font-ui: "Inter", system-ui, sans-serif;
+  --fs-11: 11px;
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-15: 15px;
+
+  --shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  --track-label-w: 88px;
+  --ruler-h: 24px;
+  --timeline-h: 220px;
+}

@@ -1,14 +1,14 @@
-mod audio_scrub;
+mod playback;
 mod preview;
 
-use audio_scrub::AudioScrubEngine;
 use parking_lot::Mutex;
+use playback::PlaybackEngine;
 use preview::{NativeWindow, PreviewBounds, PreviewPanel};
 use std::path::PathBuf;
-use tauri::{AppHandle, Manager, State};
+use std::sync::atomic::{AtomicU64, Ordering};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uppercut_core::{
-    apply_command as apply_core_command, commands::ExportPreset, export::render_frame_at,
-    project::Project, Command, ExportSettings,
+    apply_command as apply_core_command, commands::ExportPreset, project::Project, Command,
 };
 
 struct Session {
@@ -16,11 +16,83 @@ struct Session {
     project: Project,
 }
 
+/// Undo/redo stack over full `Project` snapshots — session-layer state management, not a
+/// second edit path: every entry is a project state that only ever arose from a successful
+/// `apply_command` call (or a prior undo/redo), so `apply_command` remains the sole way a
+/// project's *contents* change. See docs/architecture.md "Undo/redo" for the full
+/// rationale required by AGENTS.md.
+struct History {
+    undo: Vec<Project>,
+    redo: Vec<Project>,
+}
+
+const HISTORY_CAP: usize = 100;
+
+impl History {
+    fn new() -> Self {
+        Self {
+            undo: Vec::new(),
+            redo: Vec::new(),
+        }
+    }
+
+    /// Push onto the bounded undo stack, evicting the oldest entry past `HISTORY_CAP`.
+    fn push_undo_bounded(&mut self, project: Project) {
+        self.undo.push(project);
+        if self.undo.len() > HISTORY_CAP {
+            self.undo.remove(0);
+        }
+    }
+
+    /// Push a pre-mutation snapshot and drop the (now-stale) redo branch — call this for
+    /// a genuinely new edit, not for `redo()`'s own bookkeeping (see `push_undo_bounded`).
+    fn push_undo(&mut self, project: Project) {
+        self.push_undo_bounded(project);
+        self.redo.clear();
+    }
+
+    fn clear(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+    }
+
+    fn status(&self) -> HistoryStatus {
+        HistoryStatus {
+            can_undo: !self.undo.is_empty(),
+            can_redo: !self.redo.is_empty(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+struct HistoryStatus {
+    can_undo: bool,
+    can_redo: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ProjectChanged {
+    revision: u64,
+    can_undo: bool,
+    can_redo: bool,
+}
+
 pub struct AppState {
     session: Mutex<Option<Session>>,
     preview: Mutex<PreviewPanel>,
     parent_attached: Mutex<bool>,
-    audio: AudioScrubEngine,
+    playback: PlaybackEngine,
+    history: Mutex<History>,
+    revision: AtomicU64,
+    /// Serializes every whole-project mutation (`apply_command`, `apply_commands`, `undo`,
+    /// `redo`, and project open/create/quick-start) end-to-end — snapshot, compute,
+    /// history push, session write-back, and save all happen while this is held. Without
+    /// it, two overlapping calls (e.g. a double-tapped Ctrl+Z firing two `undo` invokes
+    /// before the first resolves) could each read the same pre-mutation project, race on
+    /// which write-back lands last, and silently corrupt the undo/redo stacks. A
+    /// `tokio`-backed async mutex (via `tauri::async_runtime`) rather than `parking_lot`,
+    /// since it must be held across `.await` points (the `spawn_blocking` compute step).
+    edit_lock: tauri::async_runtime::Mutex<()>,
 }
 
 impl AppState {
@@ -29,10 +101,16 @@ impl AppState {
             session: Mutex::new(None),
             preview: Mutex::new(PreviewPanel::new()),
             parent_attached: Mutex::new(false),
-            audio: AudioScrubEngine::new(),
+            playback: PlaybackEngine::new(),
+            history: Mutex::new(History::new()),
+            revision: AtomicU64::new(0),
+            edit_lock: tauri::async_runtime::Mutex::new(()),
         }
     }
 
+    /// Clone/mutate the project under a short-lived lock only — never hold this across
+    /// file I/O, media decode, or other blocking work (see docs/architecture.md
+    /// "Playback engine" for why the old sync-command design froze the UI thread).
     fn with_session<F, T>(&self, f: F) -> Result<T, String>
     where
         F: FnOnce(&mut Session) -> Result<T, String>,
@@ -44,9 +122,45 @@ impl AppState {
         f(session)
     }
 
-    fn save(session: &Session) -> Result<(), String> {
-        let data = serde_json::to_string_pretty(&session.project).map_err(|e| e.to_string())?;
-        std::fs::write(&session.path, data).map_err(|e| e.to_string())
+    /// Write `project` into the session and persist it to disk. The `session` lock is
+    /// held only long enough to swap in the new project and read the save path — the
+    /// actual (blocking) serialize+write runs in `spawn_blocking`, outside any lock. This
+    /// used to run `std::fs::write` synchronously while still holding `session`'s lock
+    /// (directly contradicting `with_session`'s own documented invariant above), which
+    /// stalled every other session-locking command (`play`/`seek`/`scrub_audio`/
+    /// `get_project`) behind a disk write on every single edit.
+    async fn commit_project(&self, project: Project) -> Result<(), String> {
+        let path = {
+            let mut guard = self.session.lock();
+            let session = guard
+                .as_mut()
+                .ok_or_else(|| "no project open".to_string())?;
+            let path = session.path.clone();
+            session.project = project.clone();
+            path
+        };
+        tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            let data = serde_json::to_string_pretty(&project).map_err(|e| e.to_string())?;
+            std::fs::write(&path, data).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    /// Bump the revision counter, emit `project:changed`, and return the current
+    /// undo/redo availability (every mutating command, undo, and redo call this once).
+    fn emit_project_changed(&self, app: &AppHandle) -> HistoryStatus {
+        let revision = self.revision.fetch_add(1, Ordering::SeqCst) + 1;
+        let status = self.history.lock().status();
+        let _ = app.emit(
+            "project:changed",
+            ProjectChanged {
+                revision,
+                can_undo: status.can_undo,
+                can_redo: status.can_redo,
+            },
+        );
+        status
     }
 }
 
@@ -76,7 +190,10 @@ fn ensure_preview_parent(app: &AppHandle, state: &AppState) -> Result<(), String
     if *attached {
         return Ok(());
     }
-    let parent = native_window_from_app(app)?;
+    let parent = native_window_from_app(app).inspect_err(|e| {
+        eprintln!("preview: failed to attach parent window: {e}");
+    })?;
+    eprintln!("preview: attached parent hwnd {}", parent.hwnd);
     state.preview.lock().attach_parent(parent);
     *attached = true;
     Ok(())
@@ -93,11 +210,12 @@ fn default_projects_dir() -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-fn quick_start_project(app: AppHandle, state: State<AppState>) -> Result<String, String> {
+async fn quick_start_project(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     use uppercut_core::project::Settings;
 
+    let _edit_guard = state.edit_lock.lock().await;
+    state.playback.stop();
     let dir = default_projects_dir()?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
@@ -113,25 +231,38 @@ fn quick_start_project(app: AppHandle, state: State<AppState>) -> Result<String,
             duck_db: -12.0,
         },
     );
-    let data = serde_json::to_string_pretty(&project).map_err(|e| e.to_string())?;
-    std::fs::write(&path_buf, data).map_err(|e| e.to_string())?;
+
+    let write_path = path_buf.clone();
+    let write_project = project.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let data = serde_json::to_string_pretty(&write_project).map_err(|e| e.to_string())?;
+        std::fs::write(&write_path, data).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
     *state.session.lock() = Some(Session {
         path: path_buf.clone(),
         project,
     });
+    state.history.lock().clear();
     ensure_preview_parent(&app, &state)?;
+    state.emit_project_changed(&app);
     Ok(path_buf.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
-fn new_project(
+async fn new_project(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     path: String,
     name: String,
 ) -> Result<(), String> {
     use uppercut_core::project::Settings;
 
+    let _edit_guard = state.edit_lock.lock().await;
+    state.playback.stop();
     let path_buf = PathBuf::from(&path);
     let project = Project::new(
         name,
@@ -143,53 +274,200 @@ fn new_project(
             duck_db: -12.0,
         },
     );
-    let data = serde_json::to_string_pretty(&project).map_err(|e| e.to_string())?;
-    std::fs::write(&path_buf, data).map_err(|e| e.to_string())?;
+
+    let write_path = path_buf.clone();
+    let write_project = project.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let data = serde_json::to_string_pretty(&write_project).map_err(|e| e.to_string())?;
+        std::fs::write(&write_path, data).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
     *state.session.lock() = Some(Session {
         path: path_buf,
         project,
     });
+    state.history.lock().clear();
     ensure_preview_parent(&app, &state)?;
+    state.emit_project_changed(&app);
     Ok(())
 }
 
 #[tauri::command]
-fn open_project(app: AppHandle, state: State<AppState>, path: String) -> Result<(), String> {
+async fn open_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<(), String> {
+    let _edit_guard = state.edit_lock.lock().await;
+    state.playback.stop();
     let path_buf = PathBuf::from(&path);
-    let data = std::fs::read_to_string(&path_buf).map_err(|e| e.to_string())?;
-    let project: Project = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+    let read_path = path_buf.clone();
+    let project: Project =
+        tauri::async_runtime::spawn_blocking(move || -> Result<Project, String> {
+            let data = std::fs::read_to_string(&read_path).map_err(|e| e.to_string())?;
+            serde_json::from_str(&data).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+
     *state.session.lock() = Some(Session {
         path: path_buf,
         project,
     });
+    state.history.lock().clear();
     ensure_preview_parent(&app, &state)?;
+    state.emit_project_changed(&app);
     Ok(())
 }
 
 #[tauri::command]
-fn save_project(state: State<AppState>) -> Result<(), String> {
-    state.with_session(|session| AppState::save(session))
+async fn save_project(state: State<'_, AppState>) -> Result<(), String> {
+    let (path, project) = state.with_session(|s| Ok((s.path.clone(), s.project.clone())))?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let data = serde_json::to_string_pretty(&project).map_err(|e| e.to_string())?;
+        std::fs::write(&path, data).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn get_project(state: State<AppState>) -> Result<Project, String> {
+async fn get_project(state: State<'_, AppState>) -> Result<Project, String> {
     state.with_session(|session| Ok(session.project.clone()))
 }
 
 #[tauri::command]
-fn apply_command(state: State<AppState>, command: serde_json::Value) -> Result<String, String> {
+async fn apply_command(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    command: serde_json::Value,
+) -> Result<String, String> {
+    let _edit_guard = state.edit_lock.lock().await;
     let cmd: Command =
         serde_json::from_value(command).map_err(|e| format!("invalid command: {e}"))?;
-    state.with_session(|session| {
-        let outcome = apply_core_command(&mut session.project, cmd).map_err(|e| e.to_string())?;
-        AppState::save(session)?;
-        Ok(format!("{outcome:?}"))
+    let before = state.with_session(|s| Ok(s.project.clone()))?;
+    let mut project = before.clone();
+
+    let (outcome, project) = tauri::async_runtime::spawn_blocking(move || {
+        let outcome = apply_core_command(&mut project, cmd);
+        (outcome, project)
     })
+    .await
+    .map_err(|e| e.to_string())?;
+    let outcome = outcome.map_err(|e| e.to_string())?;
+
+    state.history.lock().push_undo(before);
+    state.commit_project(project).await?;
+    state.emit_project_changed(&app);
+    Ok(format!("{outcome:?}"))
+}
+
+/// Apply a batch of commands atomically: all-or-nothing against a single project clone,
+/// one undo snapshot, one save, one `project:changed` emit — used for gestures that are
+/// logically a single edit but need more than one `Command` (e.g. CapCut-style
+/// auto-track-on-drop: `AddTrack` + `AddClip` should undo together, not as two steps).
+#[tauri::command]
+async fn apply_commands(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    commands: Vec<serde_json::Value>,
+) -> Result<Vec<String>, String> {
+    let _edit_guard = state.edit_lock.lock().await;
+    let cmds: Vec<Command> = commands
+        .into_iter()
+        .map(|c| serde_json::from_value(c).map_err(|e| format!("invalid command: {e}")))
+        .collect::<Result<_, _>>()?;
+
+    // `GenerateVoiceover` writes a real audio file as a side effect of mutating the
+    // in-memory `Project` clone — that write can't be undone by discarding the clone. If
+    // it succeeds but a *later* command in this batch fails, the whole batch reports
+    // failure and the project mutation is discarded, but without this the synthesized WAV
+    // would stay on disk forever with no project ever referencing it. Track it here (by
+    // index, matching `cmds`) so it can be deleted if the batch doesn't make it all the
+    // way through.
+    let voiceover_paths: Vec<Option<PathBuf>> = cmds
+        .iter()
+        .map(|c| match c {
+            Command::GenerateVoiceover { output_path, .. } => Some(PathBuf::from(output_path)),
+            _ => None,
+        })
+        .collect();
+
+    let before = state.with_session(|s| Ok(s.project.clone()))?;
+    let mut project = before.clone();
+
+    let (result, project) = tauri::async_runtime::spawn_blocking(move || {
+        let mut outcomes = Vec::with_capacity(cmds.len());
+        for cmd in cmds {
+            match apply_core_command(&mut project, cmd) {
+                Ok(outcome) => outcomes.push(outcome),
+                // Carry how many commands succeeded before this failure, so the caller
+                // knows exactly which earlier side-effecting commands (if any) need
+                // cleanup — not every command in the batch, only the ones that actually ran.
+                Err(e) => return (Err((outcomes.len(), e.to_string())), project),
+            }
+        }
+        (Ok(outcomes), project)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Discard the whole batch on any failure — `project` here is the partially-mutated
+    // clone, never written back, so a mid-batch error leaves the session untouched.
+    let outcomes = match result {
+        Ok(outcomes) => outcomes,
+        Err((succeeded, message)) => {
+            for path in voiceover_paths.iter().take(succeeded).flatten() {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(message);
+        }
+    };
+
+    state.history.lock().push_undo(before);
+    state.commit_project(project).await?;
+    state.emit_project_changed(&app);
+    Ok(outcomes.into_iter().map(|o| format!("{o:?}")).collect())
+}
+
+/// Restore the previous project snapshot, moving the current one onto the redo stack.
+#[tauri::command]
+async fn undo(app: AppHandle, state: State<'_, AppState>) -> Result<HistoryStatus, String> {
+    let _edit_guard = state.edit_lock.lock().await;
+    let popped = state.history.lock().undo.pop();
+    let Some(prev) = popped else {
+        return Ok(state.history.lock().status());
+    };
+
+    let current = state.with_session(|s| Ok(s.project.clone()))?;
+    state.history.lock().redo.push(current);
+    state.commit_project(prev).await?;
+    Ok(state.emit_project_changed(&app))
+}
+
+/// Re-apply the most recently undone snapshot, moving the current one onto the undo stack.
+#[tauri::command]
+async fn redo(app: AppHandle, state: State<'_, AppState>) -> Result<HistoryStatus, String> {
+    let _edit_guard = state.edit_lock.lock().await;
+    let popped = state.history.lock().redo.pop();
+    let Some(next) = popped else {
+        return Ok(state.history.lock().status());
+    };
+
+    // `push_undo_bounded`, not `push_undo` — a redo is not a new edit, so any
+    // further-forward entries already sitting below `next` on the redo stack must stay
+    // redo-able (plain `push_undo` would clear them as a new-edit side effect).
+    let current = state.with_session(|s| Ok(s.project.clone()))?;
+    state.history.lock().push_undo_bounded(current);
+    state.commit_project(next).await?;
+    Ok(state.emit_project_changed(&app))
 }
 
 #[tauri::command]
-fn export_project(
-    state: State<AppState>,
+async fn export_project(
+    state: State<'_, AppState>,
     output_path: String,
     preset: String,
 ) -> Result<(), String> {
@@ -198,19 +476,37 @@ fn export_project(
         "youtube" => ExportPreset::Youtube16x9,
         other => return Err(format!("unknown preset '{other}'")),
     };
-    state.with_session(|session| {
+    let mut project = state.with_session(|s| Ok(s.project.clone()))?;
+
+    tauri::async_runtime::spawn_blocking(move || {
         apply_core_command(
-            &mut session.project,
+            &mut project,
             Command::Export {
-                output_path: output_path.clone(),
+                output_path,
                 preset,
             },
         )
-        .map_err(|e| e.to_string())?;
-        Ok(())
+        .map(|_| ())
+        .map_err(|e| e.to_string())
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
+/// Deliberately a *sync* command, not `async fn`. Tauri dispatches sync commands on the
+/// main thread, which is required here: this is the only call site that creates the
+/// native preview child HWND and its wgpu swapchain (`PreviewPanel::set_bounds` ->
+/// `ensure_child_window` / `GfxState::new`), and Win32 windows must be created on a
+/// thread that pumps messages for them — creating one from an async command's background
+/// worker thread hangs (see docs/architecture.md "Playback engine" risk notes). Frame
+/// *presentation* from the playback/scrub worker threads onto this already-created
+/// surface is fine and unaffected by this.
+///
+/// `x`/`y`/`width`/`height` arrive as CSS logical pixels (`getBoundingClientRect()`).
+/// Win32 window APIs for a DPI-aware process expect *physical* pixels, so on any monitor
+/// scaled above 100% (125%/150%/etc. — the common case, not the exception), passing the
+/// logical values straight through undersizes and mispositions the child HWND, which is
+/// why the preview can render "successfully" (no errors) while showing nothing visible.
 #[tauri::command]
 fn set_preview_bounds(
     app: AppHandle,
@@ -221,58 +517,71 @@ fn set_preview_bounds(
     height: u32,
 ) -> Result<(), String> {
     ensure_preview_parent(&app, &state)?;
+    let scale = app
+        .get_webview_window("main")
+        .and_then(|w| w.scale_factor().ok())
+        .unwrap_or(1.0);
+    let to_px = |v: i32| -> i32 { (v as f64 * scale).round() as i32 };
+    let to_pu = |v: u32| -> u32 { (v as f64 * scale).round() as u32 };
+    let width_px = to_pu(width);
+    let height_px = to_pu(height);
+
+    // Even-round so scale=-2:h in the decoder never has to round again.
+    state.playback.set_target_size((height_px / 2) * 2);
     state
         .preview
         .lock()
         .set_bounds(PreviewBounds {
-            x,
-            y,
-            width,
-            height,
+            x: to_px(x),
+            y: to_px(y),
+            width: width_px,
+            height: height_px,
         })
         .map_err(|e| e.to_string())
 }
 
+/// Start (or resume) playback from `time_secs`. Non-blocking: hands a cloned `Project`
+/// off to the playback worker thread and returns immediately — see playback.rs.
 #[tauri::command]
-fn update_preview(app: AppHandle, state: State<AppState>, time_secs: f64) -> Result<(), String> {
+async fn play(app: AppHandle, state: State<'_, AppState>, time_secs: f64) -> Result<(), String> {
     ensure_preview_parent(&app, &state)?;
-    let (rgba, width, height) = state.with_session(|session| {
-        let settings = ExportSettings {
-            width: session.project.settings.width,
-            height: session.project.settings.height,
-            fps: session.project.settings.fps,
-        };
-        let pixels =
-            render_frame_at(&session.project, time_secs, settings).map_err(|e| e.to_string())?;
-        Ok((pixels, settings.width, settings.height))
-    })?;
-
-    state
-        .preview
-        .lock()
-        .present_rgba(&rgba, width, height)
-        .map_err(|e| e.to_string())
+    let project = state.with_session(|s| Ok(s.project.clone()))?;
+    state.playback.play(app, project, time_secs);
+    Ok(())
 }
 
+/// Stop playback and return the time to resume from.
 #[tauri::command]
-fn start_playback(state: State<AppState>, time_secs: f64) -> Result<(), String> {
-    state.with_session(|session| {
-        state.audio.start_playback(
-            session.project.clone(),
-            time_secs,
-            session.project.settings.fps,
-        )
-    })
+async fn pause(state: State<'_, AppState>) -> Result<f64, String> {
+    Ok(state.playback.pause())
 }
 
+/// Jump the playhead to `time_secs`. While playing, this coalesces into the running
+/// playback loop (audio/decoders restart from the new position without a pause/resume
+/// round trip). While paused, it renders one frame via the scrub worker.
 #[tauri::command]
-fn stop_playback(state: State<AppState>) {
-    state.audio.stop();
+async fn seek(app: AppHandle, state: State<'_, AppState>, time_secs: f64) -> Result<(), String> {
+    if state.playback.seek_while_playing(time_secs) {
+        return Ok(());
+    }
+    ensure_preview_parent(&app, &state)?;
+    let project = state.with_session(|s| Ok(s.project.clone()))?;
+    state.playback.request_preview(app, project, time_secs);
+    Ok(())
 }
 
+/// Render a frame + play a short audio blip at `time_secs` (timeline scrub feedback).
+/// Non-blocking and coalesced — safe to call on every pointermove during a drag.
 #[tauri::command]
-fn scrub_audio(state: State<AppState>, time_secs: f64) -> Result<(), String> {
-    state.with_session(|session| state.audio.play_once(&session.project, time_secs))
+async fn scrub_audio(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    time_secs: f64,
+) -> Result<(), String> {
+    ensure_preview_parent(&app, &state)?;
+    let project = state.with_session(|s| Ok(s.project.clone()))?;
+    state.playback.request_scrub_audio(app, project, time_secs);
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -287,13 +596,66 @@ pub fn run() {
             save_project,
             get_project,
             apply_command,
+            apply_commands,
+            undo,
+            redo,
             export_project,
             set_preview_bounds,
-            update_preview,
-            start_playback,
-            stop_playback,
+            play,
+            pause,
+            seek,
             scrub_audio,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Uppercut");
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    use uppercut_core::project::Settings;
+
+    fn dummy_project(tag: &str) -> Project {
+        Project::new(tag, Settings::default())
+    }
+
+    #[test]
+    fn push_undo_bounds_stack_at_history_cap() {
+        let mut history = History::new();
+        for i in 0..(HISTORY_CAP + 20) {
+            history.push_undo(dummy_project(&format!("edit-{i}")));
+        }
+        assert_eq!(history.undo.len(), HISTORY_CAP);
+        // Oldest entries should have been evicted — the surviving bottom entry is the
+        // 21st push (edits 0..19 evicted), not edit-0.
+        assert_eq!(history.undo.first().unwrap().name, "edit-20");
+        assert_eq!(history.undo.last().unwrap().name, "edit-119");
+    }
+
+    #[test]
+    fn push_undo_clears_redo_but_push_undo_bounded_does_not() {
+        let mut history = History::new();
+        history.push_undo(dummy_project("a"));
+        history.redo.push(dummy_project("stale-redo"));
+
+        // A genuinely new edit invalidates the redo branch.
+        history.push_undo(dummy_project("b"));
+        assert!(history.redo.is_empty());
+
+        // Redo's own bookkeeping push must NOT clear a redo branch that still has
+        // further-forward entries below the one just popped.
+        history.redo.push(dummy_project("still-redoable"));
+        history.push_undo_bounded(dummy_project("c"));
+        assert_eq!(history.redo.len(), 1);
+    }
+
+    #[test]
+    fn clear_empties_both_stacks() {
+        let mut history = History::new();
+        history.push_undo(dummy_project("a"));
+        history.redo.push(dummy_project("b"));
+        history.clear();
+        assert!(!history.status().can_undo);
+        assert!(!history.status().can_redo);
+    }
 }

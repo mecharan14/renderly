@@ -1,4 +1,4 @@
-//! Project schema v0 — matches docs/project-schema.md exactly.
+//! Project schema v1 — matches docs/project-schema.md exactly.
 //! If you change a type here, update that doc in the same change.
 
 use serde::{Deserialize, Serialize};
@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 pub type Id = uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 0;
+pub const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
@@ -109,6 +109,18 @@ pub struct Track {
     /// Mix role for audio ducking (Phase 1). Only meaningful on audio tracks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_role: Option<TrackAudioRole>,
+    /// Excluded from the audio mix on export/playback. GUI-facing; `apply_command`
+    /// itself doesn't gate on it (see project-schema.md v1 note).
+    #[serde(default)]
+    pub muted: bool,
+    /// GUI-honored only: `apply_command` deliberately does not reject edits to a locked
+    /// track (CLI/MCP agents may still edit it) — the GUI's timeline interactions are
+    /// responsible for refusing mouse edits when this is set.
+    #[serde(default)]
+    pub locked: bool,
+    /// Excluded from composited video layers / burned-in captions on export/playback.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +140,9 @@ impl Track {
             name: name.into(),
             clips: Vec::new(),
             audio_role: None,
+            muted: false,
+            locked: false,
+            hidden: false,
         }
     }
 

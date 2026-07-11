@@ -170,6 +170,46 @@ pub struct RgbaFrame {
     pub pixels: Vec<u8>,
 }
 
+/// Decode-time scaling/pacing knobs for `VideoReader`. Used by the playback engine to
+/// decode at panel resolution (instead of full source resolution) and at the project's
+/// output fps (instead of the source's native fps), rather than downscaling/retiming
+/// full-resolution frames after the fact.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReaderOptions {
+    /// Decode scaled so the output height matches this (even-rounded); width follows the
+    /// source aspect ratio (also even-rounded). `None` or `>=` source height keeps native
+    /// resolution.
+    pub target_height: Option<u32>,
+    /// Force this output frame rate (ffmpeg duplicates/drops frames to match). `None`
+    /// keeps the source's native frame rate.
+    pub output_fps: Option<f64>,
+}
+
+/// Round to the nearest integer, then align *up* to the next even number — mirrors
+/// ffmpeg's `FFALIGN(lrint(x), 2)`, which is what libavfilter's `scale` filter actually
+/// uses to resolve a `-2` dimension. Our previous implementation rounded down (integer
+/// division truncation) instead of up, which mismatched ffmpeg's real output dimensions
+/// and desynced the raw RGBA byte stream from our declared frame size.
+fn ffalign_even(x: f64) -> u32 {
+    let rounded = x.round() as i64;
+    (((rounded + 1) & !1).max(2)) as u32
+}
+
+/// Scaled (width, height) for `target_height`, matching ffmpeg's `scale=-2:h` behavior:
+/// height is even-aligned, width follows source aspect ratio and is also even-aligned
+/// (both rounded up, not down — see `ffalign_even`).
+fn scaled_dimensions(src_width: u32, src_height: u32, target_height: Option<u32>) -> (u32, u32) {
+    match target_height {
+        Some(h) if h > 0 && h < src_height => {
+            let height = ffalign_even(h as f64);
+            let width_f = src_width as f64 * height as f64 / src_height as f64;
+            let width = ffalign_even(width_f);
+            (width, height)
+        }
+        _ => (src_width, src_height),
+    }
+}
+
 /// Sequential RGBA frame reader backed by a long-lived `ffmpeg` decode pipe.
 pub struct VideoReader {
     child: Child,
@@ -183,37 +223,53 @@ type ChildStdout = std::process::ChildStdout;
 
 impl VideoReader {
     pub fn open(path: &Path, start_secs: f64) -> Result<Self, FfmpegCliError> {
+        Self::open_with(path, start_secs, &ReaderOptions::default())
+    }
+
+    pub fn open_with(
+        path: &Path,
+        start_secs: f64,
+        opts: &ReaderOptions,
+    ) -> Result<Self, FfmpegCliError> {
         let probed = probe_video(path)?;
-        let mut child = Command::new(ffmpeg_path()?)
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-ss",
-                &format!("{start_secs:.6}"),
-                "-i",
-            ])
-            .arg(path)
-            .args(["-an", "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
+        let (width, height) = scaled_dimensions(probed.width, probed.height, opts.target_height);
+
+        let mut cmd = Command::new(ffmpeg_path()?);
+        cmd.args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            &format!("{start_secs:.6}"),
+            "-i",
+        ])
+        .arg(path);
+        if let Some(fps) = opts.output_fps {
+            cmd.args(["-r", &format!("{fps:.6}")]);
+        }
+        if width != probed.width || height != probed.height {
+            cmd.args(["-vf", &format!("scale=-2:{height}")]);
+        }
+        cmd.args(["-an", "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| FfmpegCliError::SpawnFailed {
-                tool: "ffmpeg",
-                message: e.to_string(),
-            })?;
+            .stderr(Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|e| FfmpegCliError::SpawnFailed {
+            tool: "ffmpeg",
+            message: e.to_string(),
+        })?;
 
         let stdout = child
             .stdout
             .take()
             .ok_or_else(|| FfmpegCliError::BadOutput("no stdout".into()))?;
-        let frame_bytes = (probed.width * probed.height * 4) as usize;
+        let frame_bytes = (width * height * 4) as usize;
 
         Ok(Self {
             child,
             stdout: BufReader::new(stdout),
-            width: probed.width,
-            height: probed.height,
+            width,
+            height,
             frame_bytes,
         })
     }
@@ -594,4 +650,48 @@ pub struct AudioMixClip {
     pub fade_in_secs: f64,
     pub fade_out_secs: f64,
     pub role: Option<TrackAudioRole>,
+}
+
+#[cfg(test)]
+mod scaling_tests {
+    use super::scaled_dimensions;
+
+    #[test]
+    fn scaled_dimensions_keeps_native_size_when_target_is_none_or_larger() {
+        assert_eq!(scaled_dimensions(1920, 1080, None), (1920, 1080));
+        assert_eq!(scaled_dimensions(1920, 1080, Some(1080)), (1920, 1080));
+        assert_eq!(scaled_dimensions(1920, 1080, Some(2000)), (1920, 1080));
+    }
+
+    #[test]
+    fn scaled_dimensions_downscales_matching_source_aspect_ratio() {
+        // 16:9 source scaled to 720p height should land on the standard 1280x720.
+        let (w, h) = scaled_dimensions(1920, 1080, Some(720));
+        assert_eq!(h, 720);
+        assert_eq!(w, 1280);
+    }
+
+    #[test]
+    fn scaled_dimensions_always_even() {
+        let (w, h) = scaled_dimensions(1081, 721, Some(361));
+        assert_eq!(w % 2, 0);
+        assert_eq!(h % 2, 0);
+    }
+
+    #[test]
+    fn scaled_dimensions_rounds_up_to_even_like_ffmpeg_ffalign() {
+        // ffmpeg's `scale=-2:h` resolves a `-2` dimension via FFALIGN(lrint(x), 2), which
+        // rounds UP to the next even number, not down. An odd target height of 361 must
+        // become 362, matching real ffmpeg output exactly (a prior version floored this to
+        // 360 via integer-division truncation, desyncing our declared frame size from
+        // ffmpeg's actual raw byte stream).
+        let (_, h) = scaled_dimensions(1920, 1080, Some(361));
+        assert_eq!(h, 362);
+    }
+
+    #[test]
+    fn scaled_dimensions_width_rounds_up_like_ffmpeg_ffalign() {
+        let (w, _) = scaled_dimensions(1921, 1081, Some(721));
+        assert_eq!(w, 1284);
+    }
 }

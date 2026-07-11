@@ -1,0 +1,203 @@
+// Typed builders mirroring uppercut-core's `Command` enum exactly (docs/command-api.md).
+// Each returns a plain JSON object matching the `#[serde(tag = "command", rename_all =
+// "PascalCase")]` wire shape, ready to pass to `ipc.applyCommand`.
+
+import type { TrackAudioRole, TrackKind } from "./types";
+
+export function importMedia(path: string) {
+  return { command: "ImportMedia", path };
+}
+
+export function addTrack(kind: TrackKind, name: string, id: string | null = null) {
+  return { command: "AddTrack", kind, name, id };
+}
+
+export function addClip(
+  trackId: string,
+  mediaId: string,
+  positionSecs: number,
+  sourceInSecs: number,
+  sourceOutSecs: number,
+) {
+  return {
+    command: "AddClip",
+    track_id: trackId,
+    media_id: mediaId,
+    position_secs: positionSecs,
+    source_in_secs: sourceInSecs,
+    source_out_secs: sourceOutSecs,
+  };
+}
+
+export function splitClip(trackId: string, clipId: string, atSecs: number) {
+  return { command: "SplitClip", track_id: trackId, clip_id: clipId, at_secs: atSecs };
+}
+
+export function trimClip(
+  trackId: string,
+  clipId: string,
+  newSourceInSecs: number | null,
+  newSourceOutSecs: number | null,
+) {
+  return {
+    command: "TrimClip",
+    track_id: trackId,
+    clip_id: clipId,
+    new_source_in_secs: newSourceInSecs,
+    new_source_out_secs: newSourceOutSecs,
+  };
+}
+
+export function moveClip(
+  trackId: string,
+  clipId: string,
+  newPositionSecs: number,
+  newTrackId: string | null = null,
+) {
+  return {
+    command: "MoveClip",
+    track_id: trackId,
+    clip_id: clipId,
+    new_position_secs: newPositionSecs,
+    new_track_id: newTrackId,
+  };
+}
+
+export function deleteClip(trackId: string, clipId: string, ripple: boolean) {
+  return { command: "DeleteClip", track_id: trackId, clip_id: clipId, ripple };
+}
+
+export function addCaption(
+  trackId: string,
+  text: string,
+  positionSecs: number,
+  durationSecs: number,
+  styleId: string,
+) {
+  return {
+    command: "AddCaption",
+    track_id: trackId,
+    text,
+    position_secs: positionSecs,
+    duration_secs: durationSecs,
+    style_id: styleId,
+  };
+}
+
+export function setCaption(
+  trackId: string,
+  clipId: string,
+  fields: {
+    text?: string | null;
+    positionSecs?: number | null;
+    durationSecs?: number | null;
+    styleId?: string | null;
+  },
+) {
+  return {
+    command: "SetCaption",
+    track_id: trackId,
+    clip_id: clipId,
+    text: fields.text ?? null,
+    position_secs: fields.positionSecs ?? null,
+    duration_secs: fields.durationSecs ?? null,
+    style_id: fields.styleId ?? null,
+  };
+}
+
+export function setAudioGain(trackId: string, clipId: string, gainDb: number) {
+  return { command: "SetAudioGain", track_id: trackId, clip_id: clipId, gain_db: gainDb };
+}
+
+export function setAudioFade(
+  trackId: string,
+  clipId: string,
+  fadeInSecs: number,
+  fadeOutSecs: number,
+) {
+  return {
+    command: "SetAudioFade",
+    track_id: trackId,
+    clip_id: clipId,
+    fade_in_secs: fadeInSecs,
+    fade_out_secs: fadeOutSecs,
+  };
+}
+
+export function setTrackAudioRole(trackId: string, role: TrackAudioRole | null) {
+  return { command: "SetTrackAudioRole", track_id: trackId, role };
+}
+
+export function setProjectSettings(fields: {
+  width?: number | null;
+  height?: number | null;
+  fps?: number | null;
+}) {
+  return {
+    command: "SetProjectSettings",
+    width: fields.width ?? null,
+    height: fields.height ?? null,
+    fps: fields.fps ?? null,
+  };
+}
+
+export function setTrackFlags(
+  trackId: string,
+  fields: { muted?: boolean | null; locked?: boolean | null; hidden?: boolean | null },
+) {
+  return {
+    command: "SetTrackFlags",
+    track_id: trackId,
+    muted: fields.muted ?? null,
+    locked: fields.locked ?? null,
+    hidden: fields.hidden ?? null,
+  };
+}
+
+export function renameTrack(trackId: string, name: string) {
+  return { command: "RenameTrack", track_id: trackId, name };
+}
+
+export function deleteTrack(trackId: string) {
+  return { command: "DeleteTrack", track_id: trackId };
+}
+
+export function setClipEnabled(trackId: string, clipId: string, enabled: boolean) {
+  return { command: "SetClipEnabled", track_id: trackId, clip_id: clipId, enabled };
+}
+
+export function generateCaptions(
+  mediaId: string,
+  trackId: string,
+  styleId: string,
+  timelineOffsetSecs = 0,
+) {
+  return {
+    command: "GenerateCaptions",
+    media_id: mediaId,
+    track_id: trackId,
+    style_id: styleId,
+    timeline_offset_secs: timelineOffsetSecs,
+  };
+}
+
+export type VoiceoverProvider =
+  | { provider: "piper_local"; voice?: string }
+  | { provider: "open_ai"; voice: string };
+
+export function generateVoiceover(
+  text: string,
+  trackId: string,
+  positionSecs: number,
+  outputPath: string,
+  provider: VoiceoverProvider,
+) {
+  return {
+    command: "GenerateVoiceover",
+    text,
+    track_id: trackId,
+    position_secs: positionSecs,
+    output_path: outputPath,
+    provider,
+  };
+}

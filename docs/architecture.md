@@ -1,10 +1,12 @@
 # Architecture
 
-Status: **Phase 2 complete.** Export drives FFmpeg subprocess decode/encode with an
-offscreen wgpu compositor; the Tauri app adds a native wgpu preview surface on Windows.
-Linked libav via `ffmpeg-the-third` replaces the subprocess bridge once vcpkg/FFMPEG_DIR is
-standard in dev/CI. Later phases add effects graph, plugin host, and full direct-manipulation
-timeline tools — see [PLAN.md](../PLAN.md).
+Status: **GUI rebuild in progress (through M3 of the CapCut-class editor plan).** Export drives
+FFmpeg subprocess decode/encode with an offscreen wgpu compositor; the Tauri app adds a
+native wgpu preview surface on Windows, now backed by a persistent playback engine (see
+"Playback engine" below) instead of the Phase 2 MVP's per-frame render path. Linked libav
+via `ffmpeg-the-third` replaces the subprocess bridge once vcpkg/FFMPEG_DIR is standard in
+dev/CI. Later phases add effects graph, plugin host, and full direct-manipulation timeline
+tools — see [PLAN.md](../PLAN.md).
 
 ## Crate graph
 
@@ -79,19 +81,166 @@ does — the Tauri command layer is another thin dispatcher, not a reimplementat
 
 Two rendering surfaces coexist in one window:
 
-- **Webview** — UI chrome: media bin, timeline widget (canvas-rendered inside the webview
-  or a native overlay — decide in Phase 2), inspectors, dialogs.
+- **Webview** — UI chrome: media bin, timeline widget (canvas-rendered inside the webview),
+  inspectors, dialogs. Built with **React 19 + TypeScript + Zustand** (GUI rebuild M2;
+  PLAN.md §3 left the framework choice open — React was picked for its ecosystem and
+  because the canvas-heavy timeline benefits from keeping React out of the hot render path
+  entirely, see below). State lives in one Zustand store
+  (`uppercut-app/src/store/editorStore.ts`); components read it via selectors and never
+  call `invoke`/`listen` directly — `uppercut-app/src/lib/ipc.ts` is the *only* file that
+  imports `@tauri-apps/api`, so the backend surface is typed and grep-auditable in one
+  place (`docs/command-api.md`'s command builders live in `lib/commands.ts` next to it).
 - **Native preview surface** — a wgpu child HWND on Windows (Phase 2 v1), receiving
-  composited frames from `render_frame_at` in `uppercut-core`. Never proxies frames through
-  the webview/JS bridge.
+  composited frames from the playback engine in `uppercut-core`. Never proxies frames
+  through the webview/JS bridge.
 
-Phase 2 MVP (complete): media bin, canvas timeline with drag/trim/split/razor/snap/zoom,
-transport with audio scrub, caption inspector (`SetCaption`), export dialog. macOS/Linux
-preview surfaces land in Phase 3.
+**Timeline architecture:** the canvas timeline is deliberately *not* a React render
+target. `uppercut-app/src/timeline/renderer.ts` is a pure `(canvas, state) => void` draw
+function (colors sourced from `timeline/theme.ts`, which reads `styles/tokens.css` custom
+properties — no hex literals in `renderer.ts`, enforced by grep gate) and
+`timeline/interactions.ts` is a mouse-event state machine (hit-test → drag → commit-on-
+mouseup) that mutates the Zustand store directly. `components/timeline/TimelineCanvas.tsx`
+is a thin host: one `<canvas>`, a `useEffect` that calls `renderTimeline` on relevant store
+changes, and the `useTimelineInteractions` hook. This keeps 60fps drag feedback off React's
+reconciler — the same drag-commit pattern the old vanilla-TS timeline used (optimistic
+local mutation during drag, one command dispatched on mouseup), just running inside a
+Zustand-store-backed React app instead of a hand-rolled `render()` loop.
 
-Tauri commands: `new_project`, `open_project`, `save_project`, `get_project`, `apply_command`,
-`export_project`, `set_preview_bounds`, `update_preview`, `start_playback`, `stop_playback`,
-`scrub_audio`.
+Phase 2 MVP → GUI rebuild M2/M3 (complete): media bin (draggable cards),
+canvas timeline with drag/trim/split/razor/snap/zoom/fit, DOM `TrackHeaders` column
+(dbl-click rename, mute/lock/hide toggles, delete), cross-track drag, locked-track mouse
+guard (hatched overlay; CLI/MCP can still edit a locked track by design), bin→timeline
+drag with a ghost preview and CapCut-style auto-track-on-drop, right-click `ContextMenu`
+(split/duplicate/copy/paste/delete/ripple-delete/enable-disable), full keymap (see
+`App.tsx`'s `onKeyDown`), transport with audio scrub, tab rail (Media/Audio/Text live;
+Stickers/Effects/Transitions/Filters/Adjustment stubbed for Phase 3), caption/audio clip
+inspectors, export dialog. Thumbnails/waveforms are M4. macOS/Linux preview surfaces land
+in Phase 3.
+
+Tauri commands: `quick_start_project`, `new_project`, `open_project`, `save_project`,
+`get_project`, `apply_command`, `apply_commands`, `undo`, `redo`, `export_project`, `play`,
+`pause`, `seek`, `scrub_audio` are `async fn`, dispatched off the main thread (see
+"Playback engine" below for why). One exception: **`set_preview_bounds` stays a sync
+`fn`**, deliberately — see the callout below. `apply_commands` (GUI rebuild M3) batches
+several `Command`s atomically — one project clone, one undo snapshot, one save, one
+`project:changed` emit — for gestures that are logically a single edit but need more than
+one core command (see command-api.md "Batch application"); it's a thin Tauri-layer
+convenience over `uppercut_core::apply_command`, not a second core API.
+
+### Playback engine
+
+Phase 2's original playback path froze the window on play: every Tauri command was a sync
+`fn`, which Tauri 2 runs on the main thread, and the JS driver was a `setInterval` at
+`1000/fps` calling `update_preview` — which called `render_frame_at`, creating a **new
+wgpu Instance+Adapter+Device** and a fresh decoder map on *every tick*, and spawning
+**ffprobe + ffmpeg per video layer per frame**. At 60 fps that's ~60 GPU device creations
+and ~120 subprocess spawns a second, on the thread that also has to pump window messages —
+hence "Not Responding".
+
+The fix has two parts:
+
+- **`uppercut_core::export::FrameRenderer`** — a persistent renderer that holds one wgpu
+  `Compositor` and one open decoder per source media across repeated `render()` calls,
+  instead of rebuilding both per call. `render_frame_at` is now a one-shot convenience
+  wrapper around a throwaway `FrameRenderer`, fine for perception/MCP call sites that
+  render a single isolated frame; anything rendering a sequence (playback, export) keeps
+  one `FrameRenderer` alive for the whole run. `export_project`'s loop and the playback
+  engine below both use it directly. Decode-time scaling/pacing (`DecodeOptions` /
+  `media::ReaderOptions`, applied via `VideoReader::open_with`) let playback decode at
+  preview-panel resolution and at the project's fps instead of full source
+  resolution/native fps.
+- **`uppercut-app/src-tauri/src/playback.rs::PlaybackEngine`** — owns two long-lived
+  workers, managed from `AppState`, so the four playback commands (`play`, `pause`,
+  `seek`, `scrub_audio`) never block the async runtime's worker pool for more than a
+  clone + a channel send:
+  - A **play-session worker thread**, spawned by `play(time_secs)` and torn down by
+    `pause()`/a new `play()`/session switch. It pre-mixes timeline audio **once**, for
+    `[time_secs, duration)`, into a temp WAV via `mix_timeline_audio_range_to_file` (a
+    single ffmpeg filtergraph, not one spawn per playback chunk), starts a rodio `Sink`
+    on it, then loops: `t = start + clock`, where `clock` is `Sink::get_pos()` when audio
+    is present (rodio quantizes this to buffer boundaries, so it's read directly rather
+    than blended with a wall-clock delta) or `Instant::elapsed()` when the timeline has
+    no audio; render via `FrameRenderer::render` at `t`; present to the native preview
+    surface; emit `playback:tick`. A `seek(time_secs)` call while playing writes into a
+    one-slot `Mutex<Option<f64>>` that the loop checks every iteration and coalesces (a
+    newer seek arriving before the loop observes an older one simply overwrites it) — on
+    observing one it stops the sink, discards the temp WAV, and restarts the pre-mix/sink
+    from the new position, keeping the same `FrameRenderer` (so already-open decoders
+    just reopen at the new time instead of the whole renderer rebuilding).
+  - An always-on **scrub worker thread** serves `seek` calls made while paused and all
+    `scrub_audio` calls. Requests are coalesced the same way (one-slot, latest wins) and
+    the worker caches its own `FrameRenderer`, rebuilding it only when the requested
+    output settings actually change — so repeated scrub calls during a timeline drag
+    reuse the same wgpu device instead of recreating one per call.
+- The frontend never advances the playhead itself. The old `setInterval` loop is gone;
+  `main.ts` only listens for `playback:tick`/`playback:state` and reflects `time_secs`
+  into the timeline UI.
+
+**Win32 thread affinity:** `set_preview_bounds` is the only call site that creates the
+native preview child HWND and its wgpu swapchain (`PreviewPanel::set_bounds` ->
+`ensure_child_window` / `GfxState::new`). It must stay a *sync* Tauri command — Tauri
+dispatches sync commands on the main thread, and Win32 windows must be created on a
+thread that pumps messages for them. Making it `async fn` (as an earlier draft of this
+work did) moves that `CreateWindowExW` call onto a background tokio worker thread with no
+message loop, which hangs the very first time the preview panel is sized. Presenting
+frames onto the already-created surface from the playback/scrub worker threads is fine —
+only creation needs the main thread.
+
+### Undo/redo
+
+`uppercut-app/src-tauri/src/lib.rs::History` is a bounded (100-entry) stack of full
+`Project` snapshots — `undo: Vec<Project>`, `redo: Vec<Project>` — held in `AppState`
+alongside the session, not in `uppercut-core`. `apply_command` pushes the *pre-mutation*
+project onto `undo` (and clears `redo`, as any new edit invalidates the old redo branch)
+only after the command has actually succeeded; `undo`/`redo` pop a snapshot, push the
+current project onto the other stack, and install the popped one as the session's project.
+
+This does **not** violate AGENTS.md's "every edit through `apply_command`" rule: every
+entry in the stack is a `Project` value that only ever came from a successful
+`apply_command` call (or a previous undo/redo) — restoring one doesn't construct or mutate
+project state through any path other than that. It's app-session-layer state management
+(what to show right now), not a second way to edit a project. The command-log-based
+undo/redo `uppercut-core` eventually wants (see command-api.md's `Export` note on
+serializable commands) is a different, more powerful mechanism (replay/audit/collab) that
+can replace this later without changing the contract GUI/CLI/MCP see.
+
+`quick_start_project`/`new_project`/`open_project` all clear history — undoing past a
+project switch would try to restore a snapshot from a different project entirely.
+
+**Serialization.** `AppState::edit_lock` (a `tauri::async_runtime::Mutex<()>`, i.e. a
+`tokio` async mutex — needed because it's held across `.await` points, which a
+`parking_lot` guard can't safely do without the `send_guard` feature) is acquired for the
+full duration of `apply_command`, `apply_commands`, `undo`, `redo`, and project
+open/create/quick-start, end to end: snapshot, compute, history push, session write-back,
+and save. Earlier, these steps happened as several independent lock acquisitions
+(`session`, then `history`, then `session` again), so two overlapping calls — e.g. a
+double-tapped Ctrl+Z firing two `undo` invokes before the first resolved — could each read
+the same pre-mutation project and race on which write-back landed last, silently
+corrupting the undo/redo stacks. `edit_lock` makes that structurally impossible: every
+whole-project mutation is now fully serialized, not just "usually fine because it's rare."
+
+**Session-lock discipline.** `AppState::commit_project` is the only way any of the above
+write a project back into the session: it holds `session`'s lock just long enough to swap
+in the new `Project` and read the save path, then does the actual serialize+`fs::write` in
+`spawn_blocking`, outside any lock. This matters because `session`'s lock is also what
+`play`/`seek`/`scrub_audio`/`get_project` need — a blocking disk write held under that lock
+(the previous behavior) stalls all of those behind every single edit's save.
+
+### Event contract
+
+| Event | Payload | Emitted by |
+|---|---|---|
+| `playback:tick` | `{ time_secs: f64, playing: bool }` | ~30 Hz while playing; once on seek/EOF |
+| `playback:state` | `{ playing: bool, time_secs: f64 }` | play start, pause, end-of-timeline |
+| `project:changed` | `{ revision: u64, can_undo: bool, can_redo: bool }` | every successful `apply_command`, `undo`, `redo`, and on project open/new/quick-start |
+
+`project:changed` doesn't carry the project itself — the frontend refetches via
+`get_project` on receipt, so it's the single source of truth for "something changed,
+re-read state," regardless of whether the mutation came from the user's own `apply_command`
+call or from undo/redo.
+
+More events (`media:*-ready`, `export:progress`/`export:done`) land in later milestones
+(see PLAN.md §4) as background asset generation and progress-reporting export are built.
 
 ## Plugins (Phase 3+)
 

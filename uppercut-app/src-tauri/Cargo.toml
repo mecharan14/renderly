@@ -21,6 +21,7 @@ uppercut-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
 parking_lot = "0.12.5"
 wgpu = "30.0.0"
 pollster = "0.4.0"

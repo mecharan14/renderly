@@ -14,8 +14,8 @@ use thiserror::Error;
 
 pub use ffmpeg_cli::{
     ffmpeg_path, ffprobe_path, is_available as ffmpeg_available, mix_timeline_audio,
-    mux_video_audio, probe_video, AudioMixClip, DuckSettings, FfmpegCliError, RgbaFrame,
-    VideoEncoder, VideoReader,
+    mux_video_audio, probe_video, AudioMixClip, DuckSettings, FfmpegCliError, ReaderOptions,
+    RgbaFrame, VideoEncoder, VideoReader,
 };
 
 #[derive(Debug, Error)]

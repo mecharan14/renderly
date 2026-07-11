@@ -58,6 +58,11 @@ impl PlatformPreview {
     pub fn set_bounds(&mut self, bounds: PreviewBounds) -> Result<(), PreviewError> {
         let parent = self.parent.ok_or(PreviewError::NotInitialized)?;
         if bounds.width == 0 || bounds.height == 0 {
+            eprintln!(
+                "preview: set_bounds got a zero dimension ({}x{} at {},{}), skipping — \
+                 present_rgba will report NotInitialized until a non-zero call arrives",
+                bounds.width, bounds.height, bounds.x, bounds.y
+            );
             return Ok(());
         }
 
@@ -69,9 +74,16 @@ impl PlatformPreview {
         self.child = Some(child);
 
         if self.gfx.is_none() {
-            self.gfx = Some(GfxState::new(child, bounds.width, bounds.height)?);
+            match GfxState::new(child, bounds.width, bounds.height) {
+                Ok(gfx) => self.gfx = Some(gfx),
+                Err(e) => {
+                    eprintln!("preview: GfxState::new failed: {e}");
+                    return Err(e);
+                }
+            }
         } else if let Some(gfx) = &mut self.gfx {
-            if gfx.resize(bounds.width, bounds.height).is_err() {
+            if let Err(e) = gfx.resize(bounds.width, bounds.height) {
+                eprintln!("preview: resize failed ({e}), recreating GfxState");
                 self.gfx = Some(GfxState::new(child, bounds.width, bounds.height)?);
             }
         }
@@ -111,8 +123,23 @@ impl GfxState {
         });
 
         let surface = unsafe {
-            let target = wgpu::SurfaceTargetUnsafe::from_window(&PreviewWindowHandle(hwnd))
-                .map_err(|e| PreviewError::Wgpu(e.to_string()))?;
+            use raw_window_handle::{HasWindowHandle, RawDisplayHandle, WindowsDisplayHandle};
+
+            // NOT `SurfaceTargetUnsafe::from_window` — it unconditionally sets
+            // `raw_display_handle: None` (see wgpu's `api/surface.rs`), regardless of
+            // whether the target implements `HasDisplayHandle`. With no display handle on
+            // either the target or the `Instance` (we build the instance with
+            // `new_without_display_handle()`), `create_surface_unsafe` always fails with
+            // `MissingDisplayHandle`. Win32 has no real "display connection" concept, so
+            // we supply the no-op `WindowsDisplayHandle` marker explicitly instead.
+            let window_handle = PreviewWindowHandle(hwnd)
+                .window_handle()
+                .map_err(|e| PreviewError::Wgpu(e.to_string()))?
+                .as_raw();
+            let target = wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: Some(RawDisplayHandle::Windows(WindowsDisplayHandle::new())),
+                raw_window_handle: window_handle,
+            };
             instance
                 .create_surface_unsafe(target)
                 .map_err(|e| PreviewError::Wgpu(e.to_string()))?

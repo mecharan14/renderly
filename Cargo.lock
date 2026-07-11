@@ -5468,6 +5468,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "thiserror 1.0.69",
  "uppercut-core",
+ "uuid",
  "wgpu",
  "windows 0.62.2",
 ]

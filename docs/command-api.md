@@ -1,6 +1,6 @@
-# Command API — v0
+# Command API
 
-Status: **Phase 2 complete**. This is the source of truth for the `Command` enum and
+Status: **current** (matches project schema v1). This is the source of truth for the `Command` enum and
 `apply_command` in `uppercut-core`. GUI, CLI, and MCP must all dispatch through this exact
 set (see AGENTS.md §0.1) — none of them may mutate `Project` state any other way.
 
@@ -9,7 +9,7 @@ set (see AGENTS.md §0.1) — none of them may mutate `Project` state any other 
 ```rust
 pub enum Command {
     ImportMedia { path: String },
-    AddTrack { kind: TrackKind, name: String },
+    AddTrack { kind: TrackKind, name: String, id: Option<Id> },
     AddClip { track_id: Id, media_id: Id, position_secs: f64, source_in_secs: f64, source_out_secs: f64 },
     SplitClip { track_id: Id, clip_id: Id, at_secs: f64 },
     TrimClip { track_id: Id, clip_id: Id, new_source_in_secs: Option<f64>, new_source_out_secs: Option<f64> },
@@ -22,11 +22,22 @@ pub enum Command {
     GenerateVoiceover { text: String, track_id: Id, position_secs: f64, output_path: String, provider: VoiceoverProvider },
     SetAudioFade { track_id: Id, clip_id: Id, fade_in_secs: f64, fade_out_secs: f64 },
     SetTrackAudioRole { track_id: Id, role: Option<TrackAudioRole> },
+    SetProjectSettings { width: Option<u32>, height: Option<u32>, fps: Option<f64> },
+    SetTrackFlags { track_id: Id, muted: Option<bool>, locked: Option<bool>, hidden: Option<bool> },
+    RenameTrack { track_id: Id, name: String },
+    DeleteTrack { track_id: Id },
+    SetClipEnabled { track_id: Id, clip_id: Id, enabled: bool },
     Export { output_path: String, preset: ExportPreset },
 }
 
 pub fn apply_command(project: &mut Project, cmd: Command) -> Result<CommandOutcome, CommandError>;
 ```
+
+The GUI's Tauri layer also exposes `apply_commands(Vec<Command>)`, applying a batch
+atomically (all-or-nothing against one project clone, one undo snapshot) — see "Batch
+application" below. This is a GUI/Tauri-layer convenience over the same `apply_command`
+per-command logic, not a second core API; CLI/MCP callers just call `apply_command`
+per command as before.
 
 `CommandOutcome` carries whatever the caller needs back (e.g. `ImportMedia` returns the new
 `media_id`; edit commands return `Ok(CommandOutcome::Applied)`; `GenerateVoiceover` returns
@@ -47,7 +58,12 @@ to `project.media`. Returns the new `media_id`. Does not place anything on a tra
 
 ### `AddTrack`
 Appends a new empty `Track` of the given `kind` (`video` | `audio` | `caption`) to
-`project.tracks`. Returns the new `track_id`.
+`project.tracks`. Returns the new `track_id`. `id` is normally omitted (server generates
+one); the GUI supplies it for CapCut-style auto-track-on-drop, where an `AddTrack` and a
+following `AddClip{track_id}` in the same `apply_commands` batch need to agree on the new
+track's id before the server has actually created it (see "Batch application" below).
+
+- Errors: caller-supplied `id` collides with an existing track id.
 
 ### `AddClip`
 Adds a `VideoClip`/`AudioClip` (matching the target track's kind) referencing `media_id` to
@@ -71,7 +87,10 @@ Adjusts `source_in_secs` and/or `source_out_secs` in place (ripple is not implie
 only changes which part of the source plays, not other clips' positions). At least one of
 the two optional fields must be `Some`.
 
-- Errors: resulting `source_out_secs <= source_in_secs`, or new range exceeds media bounds.
+- Errors: `clip_id` is a caption clip (trim only applies to media clips), resulting
+  `source_out_secs <= source_in_secs`, new range exceeds media bounds, or the resulting
+  on-timeline span (position unchanged, duration recomputed from the new range) overlaps a
+  neighboring clip on the same track.
 
 ### `MoveClip`
 Changes a clip's `position_secs`, optionally moving it to a different track
@@ -91,15 +110,16 @@ Adds a `CaptionClip` with `text` at `position_secs` for `duration_secs`, tagged 
 `style_id` (a built-in style name in v0; asset-pack-provided styles come in Phase 3). Target
 track must be `kind: "caption"`.
 
-- Errors: track kind mismatch, overlap with existing caption clip on that track.
+- Errors: track kind mismatch, `duration_secs <= 0`, overlap with existing caption clip on
+  that track.
 
 ### `SetCaption` (Phase 2)
 Updates an existing `CaptionClip` on a caption track. At least one of `text`,
 `position_secs`, `duration_secs`, or `style_id` must be `Some`. Omitted fields are left
 unchanged. Used by the GUI caption inspector.
 
-- Errors: track/clip not found, track kind mismatch, no fields to change, or resulting
-  overlap with another caption on the same track.
+- Errors: track/clip not found, track kind mismatch, no fields to change, resulting
+  `duration_secs <= 0`, or resulting overlap with another caption on the same track.
 
 ### `SetAudioGain`
 Sets `gain_db` on an audio-bearing clip (`AudioClip`, or a `VideoClip` with embedded audio
@@ -144,10 +164,55 @@ export applies sidechain ducking using `settings.duck_db` (default −12 dB).
 
 - Errors: track not found, track is not audio.
 
+### `SetProjectSettings` (GUI rebuild M1)
+Changes project-level output settings (`width`, `height`, `fps` — e.g. an aspect-ratio
+switch in the GUI). At least one field must be `Some`.
+
+- Errors: no fields given, resulting `width`/`height` is `0`, or resulting `fps <= 0`.
+
+### `SetTrackFlags` (GUI rebuild M1)
+Sets `muted`, `locked`, and/or `hidden` on a track. At least one field must be `Some`;
+omitted fields are left unchanged. `muted`/`hidden` are enforced by the engine (export and
+playback both skip muted/hidden tracks); `locked` is GUI-honored only — this command does
+not itself reject edits to a locked track (see project-schema.md's `Track` note).
+
+- Errors: track not found, no fields given.
+
+### `RenameTrack` (GUI rebuild M1)
+Sets a track's `name`.
+
+- Errors: track not found.
+
+### `DeleteTrack` (GUI rebuild M1)
+Removes a track and all its clips.
+
+- Errors: track not found.
+
+### `SetClipEnabled` (GUI rebuild M1)
+Soft-enables/disables a media clip (`VideoClip`/`AudioClip`) without deleting it — the
+existing `enabled` field on those clip types, now settable directly instead of only via
+`AddClip`'s default.
+
+- Errors: track/clip not found, or the clip is a `CaptionClip` (no `enabled` field).
+
 ### `Export`
 Renders the current `Project` timeline to `output_path` using `preset` (e.g.
 `TikTok9x16`, `Youtube16x9`, or a `Custom { width, height, fps }` variant). Muxes mixed
 audio (with fades and optional music ducking) and burns caption clips.
+
+## Batch application (GUI rebuild M3)
+
+The Tauri `apply_commands` command takes `Vec<Command>` and applies them in order against
+a single `Project` clone: all-or-nothing (any command failing discards the whole batch,
+leaving the session's project untouched) and exactly one undo snapshot/save/`project:changed`
+emit for the whole batch, not one per command. This exists for gestures that are logically
+a single edit but need more than one `Command` — the motivating case is CapCut-style
+auto-track-on-drop: dropping a media card below the last timeline track dispatches
+`[AddTrack{id: Some(new_id)}, AddClip{track_id: new_id, ...}]` as one batch, so undo
+removes both the track and the clip together instead of leaving an empty track behind.
+`apply_commands` is Tauri/GUI-layer only (`uppercut-app/src-tauri/src/lib.rs`), not part
+of `uppercut-core`'s public API — CLI and MCP keep calling `apply_command` once per
+command, which is sufficient for scripted/agent use.
 
 ## Non-goals for v0
 
@@ -161,3 +226,7 @@ a command for a feature that has no schema representation yet.
 - **v0** (Phase 0): the initial 10 commands, matching project schema v0.
 - **v0 + Phase 1** (non-breaking): added `GenerateCaptions`, `GenerateVoiceover`,
   `SetAudioFade`, `SetTrackAudioRole`; export muxes audio with fades/ducking and burns captions.
+- **GUI rebuild M1** (non-breaking, project schema v1): added `SetProjectSettings`,
+  `SetTrackFlags`, `RenameTrack`, `DeleteTrack`, `SetClipEnabled`.
+- **GUI rebuild M3** (non-breaking): `AddTrack` gained an optional `id` field (server
+  still generates one when omitted); added the Tauri-layer `apply_commands` batch API.

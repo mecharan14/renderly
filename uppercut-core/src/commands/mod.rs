@@ -1,4 +1,4 @@
-//! Command API v0 — matches docs/command-api.md exactly. This is the *only* sanctioned way
+//! Command API — matches docs/command-api.md exactly. This is the *only* sanctioned way
 //! to mutate a `Project` (see AGENTS.md §0.1). GUI, CLI, and MCP all dispatch here.
 
 use crate::audio::{synthesize_to_wav, VoiceoverProvider};
@@ -16,6 +16,12 @@ pub enum Command {
     AddTrack {
         kind: TrackKind,
         name: String,
+        /// Caller-supplied id, for callers that need to reference the new track from a
+        /// second command in the same `apply_commands` batch (which can't otherwise see
+        /// an earlier command's generated id — e.g. GUI drag-drop auto-track-on-drop:
+        /// `AddTrack` + `AddClip{track_id}` atomically). Server-generates one if omitted.
+        #[serde(default)]
+        id: Option<Id>,
     },
     AddClip {
         track_id: Id,
@@ -100,6 +106,33 @@ pub enum Command {
         track_id: Id,
         role: Option<TrackAudioRole>,
     },
+    /// Change project-level output settings. At least one field must be `Some`.
+    SetProjectSettings {
+        width: Option<u32>,
+        height: Option<u32>,
+        fps: Option<f64>,
+    },
+    /// Set mute/lock/hidden flags on a track. At least one field must be `Some`.
+    /// `locked` is GUI-honored only — see `Track::locked` doc comment.
+    SetTrackFlags {
+        track_id: Id,
+        muted: Option<bool>,
+        locked: Option<bool>,
+        hidden: Option<bool>,
+    },
+    RenameTrack {
+        track_id: Id,
+        name: String,
+    },
+    DeleteTrack {
+        track_id: Id,
+    },
+    /// Soft-enable/disable a media clip (video or audio) without deleting it.
+    SetClipEnabled {
+        track_id: Id,
+        clip_id: Id,
+        enabled: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +188,20 @@ pub enum CommandError {
     Tts(#[from] crate::audio::TtsError),
     #[error("invalid fade: fade durations must be >= 0")]
     InvalidFade,
+    #[error("SetProjectSettings requires at least one of width/height/fps")]
+    SetProjectSettingsRequiresChange,
+    #[error("invalid dimensions: width and height must be > 0")]
+    InvalidDimensions,
+    #[error("SetTrackFlags requires at least one of muted/locked/hidden")]
+    SetTrackFlagsRequiresChange,
+    #[error("clip {0} is not a media clip (video/audio)")]
+    NotMediaClip(Id),
+    #[error("track id {0} already exists")]
+    DuplicateTrackId(Id),
+    #[error("invalid duration: {0} must be > 0")]
+    InvalidDuration(f64),
+    #[error("invalid fps: {0} must be > 0")]
+    InvalidFps(f64),
     #[error("not yet implemented: {0}")]
     NotImplemented(&'static str),
 }
@@ -162,7 +209,7 @@ pub enum CommandError {
 pub fn apply_command(project: &mut Project, cmd: Command) -> Result<CommandOutcome, CommandError> {
     match cmd {
         Command::ImportMedia { path } => import_media(project, &path),
-        Command::AddTrack { kind, name } => add_track(project, kind, name),
+        Command::AddTrack { kind, name, id } => add_track(project, kind, name, id),
         Command::AddClip {
             track_id,
             media_id,
@@ -273,6 +320,22 @@ pub fn apply_command(project: &mut Project, cmd: Command) -> Result<CommandOutco
         Command::SetTrackAudioRole { track_id, role } => {
             set_track_audio_role(project, track_id, role)
         }
+        Command::SetProjectSettings { width, height, fps } => {
+            set_project_settings(project, width, height, fps)
+        }
+        Command::SetTrackFlags {
+            track_id,
+            muted,
+            locked,
+            hidden,
+        } => set_track_flags(project, track_id, muted, locked, hidden),
+        Command::RenameTrack { track_id, name } => rename_track(project, track_id, name),
+        Command::DeleteTrack { track_id } => delete_track(project, track_id),
+        Command::SetClipEnabled {
+            track_id,
+            clip_id,
+            enabled,
+        } => set_clip_enabled(project, track_id, clip_id, enabled),
     }
 }
 
@@ -299,8 +362,17 @@ fn add_track(
     project: &mut Project,
     kind: TrackKind,
     name: String,
+    id: Option<Id>,
 ) -> Result<CommandOutcome, CommandError> {
-    let track = Track::new(kind, name);
+    if let Some(wanted) = id {
+        if project.tracks.iter().any(|t| t.id == wanted) {
+            return Err(CommandError::DuplicateTrackId(wanted));
+        }
+    }
+    let mut track = Track::new(kind, name);
+    if let Some(id) = id {
+        track.id = id;
+    }
     let track_id = track.id;
     project.tracks.push(track);
     Ok(CommandOutcome::TrackAdded { track_id })
@@ -323,6 +395,11 @@ fn clip_track_kind(clip: &Clip) -> TrackKind {
     }
 }
 
+/// Tolerance for overlap comparisons, so floating-point position math (e.g.
+/// `generate_captions` placing consecutive Whisper segments back-to-back) doesn't produce
+/// spurious overlaps from sub-microsecond rounding error.
+const OVERLAP_EPS: f64 = 1e-6;
+
 fn check_no_overlap(
     track: &Track,
     position_secs: f64,
@@ -336,7 +413,7 @@ fn check_no_overlap(
         }
         let existing_start = clip.position_secs();
         let existing_end = clip.end_secs();
-        if position_secs < existing_end && existing_start < new_end {
+        if position_secs < existing_end - OVERLAP_EPS && existing_start < new_end - OVERLAP_EPS {
             return Err(CommandError::Overlap(position_secs, new_end, track.id));
         }
     }
@@ -481,17 +558,15 @@ fn trim_clip(
     }
 
     let track = project
-        .find_track_mut(track_id)
+        .find_track(track_id)
         .ok_or(CommandError::TrackNotFound(track_id))?;
     let clip = track
-        .clips
-        .iter_mut()
-        .find(|c| c.id() == clip_id)
+        .find_clip(clip_id)
         .ok_or(CommandError::ClipNotFound(clip_id, track_id))?;
 
     let media_clip = match clip {
         Clip::Video(m) | Clip::Audio(m) => m,
-        Clip::Caption(_) => return Err(CommandError::TrimRequiresChange),
+        Clip::Caption(_) => return Err(CommandError::NotMediaClip(clip_id)),
     };
 
     let new_in = new_source_in_secs.unwrap_or(media_clip.source_in_secs);
@@ -499,6 +574,36 @@ fn trim_clip(
     if new_out <= new_in {
         return Err(CommandError::InvalidRange(new_out, new_in));
     }
+
+    let media_id = media_clip.media_id;
+    let position_secs = media_clip.position_secs;
+
+    // Same bounds check `AddClip` enforces — trimming shouldn't be able to reach past the
+    // media's probed duration just because `AddClip`'s check only ran once, at creation.
+    if let Some(duration) = project.find_media(media_id).and_then(|m| m.duration_secs) {
+        if new_out > duration {
+            return Err(CommandError::ExceedsMediaDuration(duration));
+        }
+    }
+
+    // Trimming changes the clip's on-timeline duration (position_secs is untouched), which
+    // can newly collide with a neighbor — every other mutator that changes a clip's span
+    // enforces this; TrimClip was the one exception.
+    let new_duration = new_out - new_in;
+    check_no_overlap(track, position_secs, new_duration, Some(clip_id))?;
+
+    let track = project
+        .find_track_mut(track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    let clip = track
+        .clips
+        .iter_mut()
+        .find(|c| c.id() == clip_id)
+        .ok_or(CommandError::ClipNotFound(clip_id, track_id))?;
+    let media_clip = match clip {
+        Clip::Video(m) | Clip::Audio(m) => m,
+        Clip::Caption(_) => unreachable!("caption already rejected above"),
+    };
 
     media_clip.source_in_secs = new_in;
     media_clip.source_out_secs = new_out;
@@ -619,6 +724,9 @@ fn add_caption(
             TrackKind::Caption,
         ));
     }
+    if duration_secs <= 0.0 {
+        return Err(CommandError::InvalidDuration(duration_secs));
+    }
 
     check_no_overlap(track, position_secs, duration_secs, None)?;
 
@@ -666,6 +774,9 @@ fn set_caption(
         .ok_or(CommandError::ClipNotFound(clip_id, track_id))?;
     let new_position = position_secs.unwrap_or_else(|| existing.position_secs());
     let new_duration = duration_secs.unwrap_or_else(|| existing.duration_secs());
+    if new_duration <= 0.0 {
+        return Err(CommandError::InvalidDuration(new_duration));
+    }
 
     check_no_overlap(track, new_position, new_duration, Some(clip_id))?;
 
@@ -841,6 +952,105 @@ fn set_track_audio_role(
     Ok(CommandOutcome::Applied)
 }
 
+fn set_project_settings(
+    project: &mut Project,
+    width: Option<u32>,
+    height: Option<u32>,
+    fps: Option<f64>,
+) -> Result<CommandOutcome, CommandError> {
+    if width.is_none() && height.is_none() && fps.is_none() {
+        return Err(CommandError::SetProjectSettingsRequiresChange);
+    }
+    let new_width = width.unwrap_or(project.settings.width);
+    let new_height = height.unwrap_or(project.settings.height);
+    if new_width == 0 || new_height == 0 {
+        return Err(CommandError::InvalidDimensions);
+    }
+    if let Some(fps) = fps {
+        if fps <= 0.0 {
+            return Err(CommandError::InvalidFps(fps));
+        }
+    }
+
+    project.settings.width = new_width;
+    project.settings.height = new_height;
+    if let Some(fps) = fps {
+        project.settings.fps = fps;
+    }
+    Ok(CommandOutcome::Applied)
+}
+
+fn set_track_flags(
+    project: &mut Project,
+    track_id: Id,
+    muted: Option<bool>,
+    locked: Option<bool>,
+    hidden: Option<bool>,
+) -> Result<CommandOutcome, CommandError> {
+    if muted.is_none() && locked.is_none() && hidden.is_none() {
+        return Err(CommandError::SetTrackFlagsRequiresChange);
+    }
+    let track = project
+        .find_track_mut(track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    if let Some(m) = muted {
+        track.muted = m;
+    }
+    if let Some(l) = locked {
+        track.locked = l;
+    }
+    if let Some(h) = hidden {
+        track.hidden = h;
+    }
+    Ok(CommandOutcome::Applied)
+}
+
+fn rename_track(
+    project: &mut Project,
+    track_id: Id,
+    name: String,
+) -> Result<CommandOutcome, CommandError> {
+    let track = project
+        .find_track_mut(track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    track.name = name;
+    Ok(CommandOutcome::Applied)
+}
+
+fn delete_track(project: &mut Project, track_id: Id) -> Result<CommandOutcome, CommandError> {
+    let idx = project
+        .tracks
+        .iter()
+        .position(|t| t.id == track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    project.tracks.remove(idx);
+    Ok(CommandOutcome::Applied)
+}
+
+fn set_clip_enabled(
+    project: &mut Project,
+    track_id: Id,
+    clip_id: Id,
+    enabled: bool,
+) -> Result<CommandOutcome, CommandError> {
+    let track = project
+        .find_track_mut(track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    let clip = track
+        .clips
+        .iter_mut()
+        .find(|c| c.id() == clip_id)
+        .ok_or(CommandError::ClipNotFound(clip_id, track_id))?;
+
+    match clip {
+        Clip::Video(m) | Clip::Audio(m) => {
+            m.enabled = enabled;
+            Ok(CommandOutcome::Applied)
+        }
+        Clip::Caption(_) => Err(CommandError::NotMediaClip(clip_id)),
+    }
+}
+
 fn generate_voiceover(
     project: &mut Project,
     text: &str,
@@ -877,7 +1087,7 @@ fn generate_voiceover(
     let media_id = Id::new_v4();
     project.media.push(MediaItem {
         id: media_id,
-        path: path_buf,
+        path: path_buf.clone(),
         kind: probed.kind.unwrap_or(crate::project::MediaKind::Audio),
         duration_secs: Some(duration),
         width: probed.width,
@@ -885,7 +1095,18 @@ fn generate_voiceover(
         fps: probed.fps,
     });
 
-    let outcome = add_clip(project, track_id, media_id, position_secs, 0.0, duration)?;
+    // The only way this can still fail here is `add_clip`'s overlap check (track/media
+    // validity and the `[0, duration)` range are already guaranteed) — but real audio has
+    // already been synthesized to `path_buf` by this point (its duration isn't knowable
+    // before synthesis, so the overlap couldn't have been checked any earlier). Clean up
+    // the file on failure rather than leaving an orphaned WAV with no project reference.
+    let outcome = match add_clip(project, track_id, media_id, position_secs, 0.0, duration) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            let _ = std::fs::remove_file(&path_buf);
+            return Err(e);
+        }
+    };
     let clip_id = match outcome {
         CommandOutcome::ClipAdded { clip_id } => clip_id,
         _ => unreachable!(),
@@ -953,6 +1174,26 @@ mod tests {
     }
 
     #[test]
+    fn add_track_honors_caller_supplied_id() {
+        let mut project = test_project();
+        let wanted_id = Id::new_v4();
+        let outcome = apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Video,
+                name: "V1".into(),
+                id: Some(wanted_id),
+            },
+        )
+        .unwrap();
+        let CommandOutcome::TrackAdded { track_id } = outcome else {
+            panic!("expected TrackAdded");
+        };
+        assert_eq!(track_id, wanted_id);
+        assert!(project.find_track(wanted_id).is_some());
+    }
+
+    #[test]
     fn add_clip_rejects_overlap() {
         let dir = std::env::temp_dir().join(format!("uppercut-test-{}", Id::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -975,6 +1216,7 @@ mod tests {
             Command::AddTrack {
                 kind: TrackKind::Audio,
                 name: "A1".into(),
+                id: None,
             },
         )
         .unwrap()
@@ -1034,6 +1276,7 @@ mod tests {
             Command::AddTrack {
                 kind: TrackKind::Audio,
                 name: "A1".into(),
+                id: None,
             },
         )
         .unwrap()
@@ -1103,6 +1346,7 @@ mod tests {
             Command::AddTrack {
                 kind: TrackKind::Audio,
                 name: "A1".into(),
+                id: None,
             },
         )
         .unwrap()
@@ -1166,6 +1410,7 @@ mod tests {
             Command::AddTrack {
                 kind: TrackKind::Video,
                 name: "V1".into(),
+                id: None,
             },
         )
         .unwrap()
@@ -1197,6 +1442,7 @@ mod tests {
             Command::AddTrack {
                 kind: TrackKind::Caption,
                 name: "C1".into(),
+                id: None,
             },
         )
         .unwrap()
@@ -1275,6 +1521,7 @@ mod tests {
             Command::AddTrack {
                 kind: TrackKind::Caption,
                 name: "C1".into(),
+                id: None,
             },
         )
         .unwrap()
@@ -1317,6 +1564,7 @@ mod tests {
             Command::AddTrack {
                 kind: TrackKind::Video,
                 name: "V1".into(),
+                id: None,
             },
         )
         .unwrap()
@@ -1329,6 +1577,7 @@ mod tests {
             Command::AddTrack {
                 kind: TrackKind::Caption,
                 name: "C1".into(),
+                id: None,
             },
         )
         .unwrap()
@@ -1389,6 +1638,7 @@ mod tests {
             Command::AddTrack {
                 kind: TrackKind::Video,
                 name: "V1".into(),
+                id: None,
             },
         )
         .unwrap()
@@ -1428,6 +1678,7 @@ mod tests {
             Command::AddTrack {
                 kind: TrackKind::Audio,
                 name: "A1".into(),
+                id: None,
             },
         )
         .unwrap()
@@ -1484,6 +1735,7 @@ mod tests {
             Command::AddTrack {
                 kind: TrackKind::Video,
                 name: "V1".into(),
+                id: None,
             },
         )
         .unwrap()
@@ -1501,6 +1753,513 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, CommandError::TrackKindMismatch(_, _, _)));
+    }
+
+    #[test]
+    fn set_project_settings_updates_dimensions_and_fps() {
+        let mut project = test_project();
+        apply_command(
+            &mut project,
+            Command::SetProjectSettings {
+                width: Some(1920),
+                height: Some(1080),
+                fps: Some(30.0),
+            },
+        )
+        .unwrap();
+        assert_eq!(project.settings.width, 1920);
+        assert_eq!(project.settings.height, 1080);
+        assert!((project.settings.fps - 30.0).abs() < 1e-9);
+
+        let err = apply_command(
+            &mut project,
+            Command::SetProjectSettings {
+                width: None,
+                height: None,
+                fps: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            CommandError::SetProjectSettingsRequiresChange
+        ));
+
+        let err = apply_command(
+            &mut project,
+            Command::SetProjectSettings {
+                width: Some(0),
+                height: None,
+                fps: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::InvalidDimensions));
+    }
+
+    #[test]
+    fn set_track_flags_updates_only_given_fields() {
+        let mut project = test_project();
+        let track_id = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Video,
+                name: "V1".into(),
+                id: None,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+
+        apply_command(
+            &mut project,
+            Command::SetTrackFlags {
+                track_id,
+                muted: None,
+                locked: None,
+                hidden: Some(true),
+            },
+        )
+        .unwrap();
+        let track = project.find_track(track_id).unwrap();
+        assert!(track.hidden);
+        assert!(!track.muted);
+        assert!(!track.locked);
+
+        let err = apply_command(
+            &mut project,
+            Command::SetTrackFlags {
+                track_id,
+                muted: None,
+                locked: None,
+                hidden: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::SetTrackFlagsRequiresChange));
+    }
+
+    #[test]
+    fn rename_track_changes_name() {
+        let mut project = test_project();
+        let track_id = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Video,
+                name: "V1".into(),
+                id: None,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        apply_command(
+            &mut project,
+            Command::RenameTrack {
+                track_id,
+                name: "Gameplay A".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(project.find_track(track_id).unwrap().name, "Gameplay A");
+    }
+
+    #[test]
+    fn delete_track_removes_it() {
+        let mut project = test_project();
+        let track_id = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Video,
+                name: "V1".into(),
+                id: None,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        apply_command(&mut project, Command::DeleteTrack { track_id }).unwrap();
+        assert!(project.find_track(track_id).is_none());
+
+        let err = apply_command(&mut project, Command::DeleteTrack { track_id }).unwrap_err();
+        assert!(matches!(err, CommandError::TrackNotFound(_)));
+    }
+
+    #[test]
+    fn set_clip_enabled_toggles_media_clip_and_rejects_captions() {
+        let dir = std::env::temp_dir().join(format!("uppercut-test-{}", Id::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav_path = write_temp_wav(&dir, "clip.wav", 5.0);
+
+        let mut project = test_project();
+        let media_id = match apply_command(
+            &mut project,
+            Command::ImportMedia {
+                path: wav_path.to_string_lossy().to_string(),
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::MediaImported { media_id } => media_id,
+            _ => unreachable!(),
+        };
+        let track_id = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Audio,
+                name: "A1".into(),
+                id: None,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        let clip_id = match apply_command(
+            &mut project,
+            Command::AddClip {
+                track_id,
+                media_id,
+                position_secs: 0.0,
+                source_in_secs: 0.0,
+                source_out_secs: 5.0,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::ClipAdded { clip_id } => clip_id,
+            _ => unreachable!(),
+        };
+
+        apply_command(
+            &mut project,
+            Command::SetClipEnabled {
+                track_id,
+                clip_id,
+                enabled: false,
+            },
+        )
+        .unwrap();
+        let clip = project
+            .find_track(track_id)
+            .unwrap()
+            .find_clip(clip_id)
+            .unwrap();
+        match clip {
+            Clip::Audio(m) => assert!(!m.enabled),
+            _ => panic!("expected audio clip"),
+        }
+
+        let caption_track_id = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Caption,
+                name: "C1".into(),
+                id: None,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        let caption_clip_id = match apply_command(
+            &mut project,
+            Command::AddCaption {
+                track_id: caption_track_id,
+                text: "hi".into(),
+                position_secs: 0.0,
+                duration_secs: 1.0,
+                style_id: "tiktok-bold-yellow".into(),
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::ClipAdded { clip_id } => clip_id,
+            _ => unreachable!(),
+        };
+        let err = apply_command(
+            &mut project,
+            Command::SetClipEnabled {
+                track_id: caption_track_id,
+                clip_id: caption_clip_id,
+                enabled: false,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::NotMediaClip(_)));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn trim_clip_rejects_overlap_with_neighbor() {
+        let dir = std::env::temp_dir().join(format!("uppercut-test-{}", Id::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav_path = write_temp_wav(&dir, "clip.wav", 10.0);
+
+        let mut project = test_project();
+        let media_id = match apply_command(
+            &mut project,
+            Command::ImportMedia {
+                path: wav_path.to_string_lossy().to_string(),
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::MediaImported { media_id } => media_id,
+            _ => unreachable!(),
+        };
+        let track_id = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Audio,
+                name: "A1".into(),
+                id: None,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        let first = match apply_command(
+            &mut project,
+            Command::AddClip {
+                track_id,
+                media_id,
+                position_secs: 0.0,
+                source_in_secs: 0.0,
+                source_out_secs: 2.0,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::ClipAdded { clip_id } => clip_id,
+            _ => unreachable!(),
+        };
+        apply_command(
+            &mut project,
+            Command::AddClip {
+                track_id,
+                media_id,
+                position_secs: 2.0,
+                source_in_secs: 0.0,
+                source_out_secs: 3.0,
+            },
+        )
+        .unwrap();
+
+        // Extending clip 1's source_out lengthens its on-timeline span past 2.0s, colliding
+        // with clip 2 which starts exactly there.
+        let err = apply_command(
+            &mut project,
+            Command::TrimClip {
+                track_id,
+                clip_id: first,
+                new_source_in_secs: None,
+                new_source_out_secs: Some(4.0),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::Overlap(_, _, _)));
+
+        // Original clip must be untouched after the rejected trim.
+        let clip = project
+            .find_track(track_id)
+            .unwrap()
+            .find_clip(first)
+            .unwrap();
+        assert!((clip.duration_secs() - 2.0).abs() < 1e-9);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn trim_clip_rejects_exceeding_media_duration() {
+        let dir = std::env::temp_dir().join(format!("uppercut-test-{}", Id::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav_path = write_temp_wav(&dir, "clip.wav", 5.0);
+
+        let mut project = test_project();
+        let media_id = match apply_command(
+            &mut project,
+            Command::ImportMedia {
+                path: wav_path.to_string_lossy().to_string(),
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::MediaImported { media_id } => media_id,
+            _ => unreachable!(),
+        };
+        let track_id = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Audio,
+                name: "A1".into(),
+                id: None,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        let clip_id = match apply_command(
+            &mut project,
+            Command::AddClip {
+                track_id,
+                media_id,
+                position_secs: 0.0,
+                source_in_secs: 0.0,
+                source_out_secs: 3.0,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::ClipAdded { clip_id } => clip_id,
+            _ => unreachable!(),
+        };
+
+        let err = apply_command(
+            &mut project,
+            Command::TrimClip {
+                track_id,
+                clip_id,
+                new_source_in_secs: None,
+                new_source_out_secs: Some(9.0),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::ExceedsMediaDuration(_)));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn trim_clip_rejects_caption_clip() {
+        let mut project = test_project();
+        let track_id = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Caption,
+                name: "C1".into(),
+                id: None,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        let clip_id = match apply_command(
+            &mut project,
+            Command::AddCaption {
+                track_id,
+                text: "hi".into(),
+                position_secs: 0.0,
+                duration_secs: 1.0,
+                style_id: "tiktok-bold-yellow".into(),
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::ClipAdded { clip_id } => clip_id,
+            _ => unreachable!(),
+        };
+
+        let err = apply_command(
+            &mut project,
+            Command::TrimClip {
+                track_id,
+                clip_id,
+                new_source_in_secs: Some(0.5),
+                new_source_out_secs: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::NotMediaClip(_)));
+    }
+
+    #[test]
+    fn add_track_rejects_duplicate_id() {
+        let mut project = test_project();
+        let wanted_id = Id::new_v4();
+        apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Video,
+                name: "V1".into(),
+                id: Some(wanted_id),
+            },
+        )
+        .unwrap();
+
+        let err = apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Audio,
+                name: "A1".into(),
+                id: Some(wanted_id),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::DuplicateTrackId(id) if id == wanted_id));
+    }
+
+    #[test]
+    fn add_caption_rejects_zero_duration() {
+        let mut project = test_project();
+        let track_id = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Caption,
+                name: "C1".into(),
+                id: None,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+
+        let err = apply_command(
+            &mut project,
+            Command::AddCaption {
+                track_id,
+                text: "hi".into(),
+                position_secs: 0.0,
+                duration_secs: 0.0,
+                style_id: "tiktok-bold-yellow".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::InvalidDuration(_)));
+    }
+
+    #[test]
+    fn set_project_settings_rejects_invalid_fps() {
+        let mut project = test_project();
+        let err = apply_command(
+            &mut project,
+            Command::SetProjectSettings {
+                width: None,
+                height: None,
+                fps: Some(0.0),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::InvalidFps(_)));
     }
 
     #[test]

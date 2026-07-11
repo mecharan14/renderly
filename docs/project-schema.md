@@ -1,6 +1,6 @@
-# Project schema — v0
+# Project schema — v1
 
-Status: **spec for Phase 0**. This is the source of truth for `uppercut-core`'s project
+Status: **current**. This is the source of truth for `uppercut-core`'s project
 model. Implementation types in `uppercut-core/src/project/` must match this document; if
 they diverge, fix whichever one is wrong and note it in the same PR. Schema changes bump
 `schema_version` and are documented in the "Version history" section at the bottom.
@@ -12,7 +12,7 @@ extension `.uppercut.json`.
 
 ```jsonc
 {
-  "schema_version": 0,
+  "schema_version": 1,
   "id": "b3f1c2a0-...-uuid",
   "name": "ultra-bruno-ep12",
   "settings": {
@@ -29,7 +29,7 @@ extension `.uppercut.json`.
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | u32 | `0` for this spec. Loaders must reject unknown newer versions rather than guess. |
+| `schema_version` | u32 | `1` for this spec. Loaders must reject unknown newer versions rather than guess. |
 | `id` | string (UUIDv4) | Stable project identity, generated on creation. |
 | `name` | string | Human-facing project name; not used for file paths. |
 | `settings.fps` | f64 | Timeline/output frame rate. |
@@ -72,6 +72,9 @@ need bounds against media duration (e.g. `AddClip`) skip that validation when th
   "kind": "video",             // "video" | "audio" | "caption"
   "name": "Gameplay A",
   "audio_role": "music",       // optional on audio tracks: voiceover | dialog | music | ambience
+  "muted": false,               // v1: excluded from the audio mix on export/playback
+  "locked": false,              // v1: GUI-honored only, see note below
+  "hidden": false,               // v1: excluded from composited video/burned-in caption layers
   "clips": [ /* Clip[], see below — shape depends on track kind */ ]
 }
 ```
@@ -79,6 +82,13 @@ need bounds against media duration (e.g. `AddClip`) skip that validation when th
 Clips within a track are not required to be pre-sorted in the JSON; consumers sort by
 `position_secs` on load. Clips within a single track must not overlap (enforced by
 `apply_command`, not by the schema itself).
+
+`muted`/`locked`/`hidden` default to `false` and are omittable in v0 project files (loaded
+via `#[serde(default)]`, no migration step needed). `muted` and `hidden` are enforced by
+the engine itself (export and the playback engine both skip muted/hidden tracks — see
+`uppercut-core/src/export/mod.rs`). `locked` is **GUI-honored only**: `apply_command`
+deliberately does not reject edits to a locked track, so CLI/MCP agents can still edit it;
+the GUI's timeline interactions are responsible for refusing mouse edits when it's set.
 
 ## Clip variants
 
@@ -137,3 +147,5 @@ together with the code.
   line-level captions, no effects/transitions/keyframes.
 - **v0 + Phase 1** (non-breaking): `Track.audio_role`, `MediaClip.fade_in_secs` /
   `fade_out_secs`, `Settings.duck_db`.
+- **v1** (GUI rebuild M1, non-breaking): `Track.muted` / `locked` / `hidden`. v0 files
+  load unchanged (fields default to `false`); no migration required.
