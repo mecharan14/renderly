@@ -38,7 +38,8 @@ jobs:
             libxfixes-dev \
             libwayland-dev \
             libxkbcommon-dev \
-            libssl-dev
+            libssl-dev \
+            libasound2-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
