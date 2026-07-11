@@ -1,8 +1,8 @@
-# Uppercut
+# Renderly
 
 **An open-source, native video editor built for AI agents — and the humans who finish the job.**
 
-Uppercut is a from-scratch, cross-platform video editor aimed at closing the gap between
+Renderly is a from-scratch, cross-platform video editor aimed at closing the gap between
 free and workflows currently locked behind paywalled editors. It has two goals that
 reinforce each other:
 
@@ -31,17 +31,17 @@ before contributing or building on this.
 
 Editing gameplay footage to a script in a paywalled editor works, but too many of the
 features that make it fast — the ones that actually matter — sit behind a subscription.
-Uppercut is an attempt to build the same caliber of editor as free, open, and automatable
+Renderly is an attempt to build the same caliber of editor as free, open, and automatable
 software, so the tool decides nothing about what you're allowed to do.
 
 ## Architecture at a glance
 
 ```
-uppercut-core/     headless Rust engine — project model, command API, media I/O, compositing.
+renderly-core/     headless Rust engine — project model, command API, media I/O, compositing.
                     No UI dependencies. The single source of truth every frontend calls into.
-uppercut-cli/       thin CLI over the command API — scriptable, the simplest agent-drivable surface.
-uppercut-mcp/       MCP server exposing the same commands + perception tools to AI agents. (Phase 1)
-uppercut-app/       Tauri 2 desktop app; native GPU preview surface, webview for UI chrome only. (Phase 2)
+renderly-cli/       thin CLI over the command API — scriptable, the simplest agent-drivable surface.
+renderly-mcp/       MCP server exposing the same commands + perception tools to AI agents. (Phase 1)
+renderly-app/       Tauri 2 desktop app; native GPU preview surface, webview for UI chrome only. (Phase 2)
 ```
 
 One command API, one project schema, dispatched identically by the GUI, the CLI, and the
@@ -78,10 +78,10 @@ cargo test --workspace
 Try the CLI:
 
 ```sh
-cargo run -p uppercut-cli -- new-project demo.uppercut.json --name "my-edit"
-cargo run -p uppercut-cli -- apply demo.uppercut.json '{"command":"AddTrack","kind":"audio","name":"A1"}'
-cargo run -p uppercut-cli -- show demo.uppercut.json
-cargo run -p uppercut-cli -- export demo.uppercut.json out.mp4 --preset tiktok
+cargo run -p renderly-cli -- new-project demo.renderly.json --name "my-edit"
+cargo run -p renderly-cli -- apply demo.renderly.json '{"command":"AddTrack","kind":"audio","name":"A1"}'
+cargo run -p renderly-cli -- show demo.renderly.json
+cargo run -p renderly-cli -- export demo.renderly.json out.mp4 --preset tiktok
 ```
 
 Export requires `ffmpeg` and `ffprobe` on PATH (used as subprocesses in Phase 0; linked
@@ -90,11 +90,11 @@ Export requires `ffmpeg` and `ffprobe` on PATH (used as subprocesses in Phase 0;
 ### MCP (AI agents)
 
 ```sh
-cargo run -p uppercut-mcp
+cargo run -p renderly-mcp
 ```
 
 See [docs/mcp-agent-guide.md](docs/mcp-agent-guide.md) for tool list and a script-to-export workflow.
-Set `UPPERCUT_WHISPER_MODEL` for auto-captions, `UPPERCUT_PIPER_MODEL` for local TTS, or
+Set `RENDERLY_WHISPER_MODEL` for auto-captions, `RENDERLY_PIPER_MODEL` for local TTS, or
 `OPENAI_API_KEY` for OpenAI voiceover.
 
 ### Desktop app (Phase 2)
@@ -102,7 +102,7 @@ Set `UPPERCUT_WHISPER_MODEL` for auto-captions, `UPPERCUT_PIPER_MODEL` for local
 Requires Node.js 20+ and FFmpeg on PATH.
 
 ```sh
-cd uppercut-app
+cd renderly-app
 npm install
 npm run tauri dev
 ```

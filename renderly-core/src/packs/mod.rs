@@ -1,0 +1,384 @@
+//! Declarative asset packs (`pack.json` + assets). See docs/asset-pack.md.
+
+use crate::media::RgbaFrame;
+use crate::project::{EffectInstance, Project};
+use serde::Deserialize;
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PackManifest {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_pack_version")]
+    pub version: String,
+    #[serde(default)]
+    pub caption_styles: Vec<PackCaptionStyle>,
+    #[serde(default)]
+    pub luts: Vec<PackLut>,
+    #[serde(default)]
+    pub transitions: Vec<PackTransitionAlias>,
+    #[serde(default)]
+    pub stickers: Vec<PackSticker>,
+    #[serde(default)]
+    pub sfx: Vec<PackSfx>,
+    /// Named command sequences applied via `ApplyTemplate` (Phase 4).
+    #[serde(default)]
+    pub templates: Vec<PackTemplate>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PackTemplate {
+    pub id: String,
+    pub label: String,
+    /// Serialized `Command` values; `AddClip.position_secs` is offset by the apply call.
+    #[serde(default)]
+    pub commands: Vec<serde_json::Value>,
+}
+
+fn default_pack_version() -> String {
+    "1".into()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PackCaptionStyle {
+    pub id: String,
+    pub label: String,
+    #[serde(default = "default_font_scale")]
+    pub font_scale: f32,
+    #[serde(default = "default_fill")]
+    pub fill_rgba: [u8; 4],
+    #[serde(default)]
+    pub stroke_rgba: Option<[u8; 4]>,
+    #[serde(default)]
+    pub stroke_width: f32,
+    #[serde(default)]
+    pub shadow_rgba: Option<[u8; 4]>,
+    #[serde(default)]
+    pub shadow_offset: [f32; 2],
+    #[serde(default)]
+    pub box_rgba: Option<[u8; 4]>,
+    #[serde(default = "default_anchor")]
+    pub anchor: String,
+}
+
+fn default_font_scale() -> f32 {
+    0.06
+}
+fn default_fill() -> [u8; 4] {
+    [255, 255, 255, 255]
+}
+fn default_anchor() -> String {
+    "bottom".into()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PackLut {
+    pub id: String,
+    pub label: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PackTransitionAlias {
+    pub id: String,
+    pub label: String,
+    /// Builtin transition kind name (`crossfade`, `wipe_left`, …).
+    pub kind: String,
+    #[serde(default = "default_transition_duration")]
+    pub default_duration_secs: f64,
+}
+
+fn default_transition_duration() -> f64 {
+    0.5
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PackSticker {
+    pub id: String,
+    pub label: String,
+    pub path: String,
+    #[serde(default = "default_sticker_duration")]
+    pub default_duration_secs: f64,
+}
+
+fn default_sticker_duration() -> f64 {
+    3.0
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PackSfx {
+    pub id: String,
+    pub label: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LoadedPack {
+    pub root: PathBuf,
+    pub manifest: PackManifest,
+    pub luts: BTreeMap<String, CubeLut>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CubeLut {
+    pub size: usize,
+    /// Packed RGB triples, size^3 entries.
+    pub data: Vec<[f32; 3]>,
+}
+
+pub fn load_pack(root: &Path) -> Result<LoadedPack, String> {
+    let manifest_path = root.join("pack.json");
+    let text = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let manifest: PackManifest =
+        serde_json::from_str(&text).map_err(|e| format!("pack.json: {e}"))?;
+    if manifest.id.trim().is_empty() {
+        return Err("pack id must be non-empty".into());
+    }
+    let mut luts = BTreeMap::new();
+    for lut in &manifest.luts {
+        let path = root.join(&lut.path);
+        let cube = parse_cube(&path).map_err(|e| format!("lut '{}': {e}", lut.id))?;
+        luts.insert(lut.id.clone(), cube);
+    }
+    Ok(LoadedPack {
+        root: root.to_path_buf(),
+        manifest,
+        luts,
+    })
+}
+
+pub fn find_pack<'a>(packs: &'a [LoadedPack], pack_id: &str) -> Option<&'a LoadedPack> {
+    packs.iter().find(|p| p.manifest.id == pack_id)
+}
+
+pub fn find_sticker<'a>(
+    packs: &'a [LoadedPack],
+    pack_id: &str,
+    sticker_id: &str,
+) -> Option<(&'a LoadedPack, &'a PackSticker)> {
+    let pack = find_pack(packs, pack_id)?;
+    let sticker = pack.manifest.stickers.iter().find(|s| s.id == sticker_id)?;
+    Some((pack, sticker))
+}
+
+pub fn find_sfx<'a>(
+    packs: &'a [LoadedPack],
+    pack_id: &str,
+    sfx_id: &str,
+) -> Option<(&'a LoadedPack, &'a PackSfx)> {
+    let pack = find_pack(packs, pack_id)?;
+    let sfx = pack.manifest.sfx.iter().find(|s| s.id == sfx_id)?;
+    Some((pack, sfx))
+}
+
+pub fn pack_id_at(root: &Path) -> Option<String> {
+    load_pack(root).ok().map(|p| p.manifest.id)
+}
+
+pub fn load_project_packs(project: &Project) -> Vec<LoadedPack> {
+    let mut out = Vec::new();
+    for path in &project.asset_pack_paths {
+        if let Ok(pack) = load_pack(path) {
+            out.push(pack);
+        }
+    }
+    out
+}
+
+pub fn known_effect_ids(project: &Project) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for pack in load_project_packs(project) {
+        for lut in &pack.manifest.luts {
+            ids.insert(format!("pack:{}:lut:{}", pack.manifest.id, lut.id));
+        }
+    }
+    ids
+}
+
+pub fn effect_id_for_lut(pack_id: &str, lut_id: &str) -> String {
+    format!("pack:{pack_id}:lut:{lut_id}")
+}
+
+/// Apply enabled pack LUT effects (CPU) to a frame in list order.
+pub fn apply_pack_effects(project: &Project, frame: &mut RgbaFrame, effects: &[EffectInstance]) {
+    let packs = load_project_packs(project);
+    for effect in effects.iter().filter(|e| e.enabled) {
+        let Some((pack_id, lut_id)) = parse_pack_lut_id(&effect.effect_id) else {
+            continue;
+        };
+        let Some(pack) = packs.iter().find(|p| p.manifest.id == pack_id) else {
+            continue;
+        };
+        let Some(cube) = pack.luts.get(lut_id) else {
+            continue;
+        };
+        let intensity = effect
+            .params
+            .get("intensity")
+            .copied()
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0) as f32;
+        apply_cube(frame, cube, intensity);
+    }
+}
+
+pub fn parse_pack_lut_id(effect_id: &str) -> Option<(&str, &str)> {
+    let rest = effect_id.strip_prefix("pack:")?;
+    let (pack_id, lut) = rest.split_once(":lut:")?;
+    if pack_id.is_empty() || lut.is_empty() {
+        return None;
+    }
+    Some((pack_id, lut))
+}
+
+pub fn find_caption_style<'a>(
+    packs: &'a [LoadedPack],
+    style_id: &str,
+) -> Option<&'a PackCaptionStyle> {
+    for pack in packs {
+        if let Some(s) = pack
+            .manifest
+            .caption_styles
+            .iter()
+            .find(|s| s.id == style_id)
+        {
+            return Some(s);
+        }
+    }
+    None
+}
+
+fn parse_cube(path: &Path) -> Result<CubeLut, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut size = 0usize;
+    let mut data = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("TITLE") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("LUT_3D_SIZE") {
+            size = rest
+                .trim()
+                .parse()
+                .map_err(|_| "invalid LUT_3D_SIZE".to_string())?;
+            continue;
+        }
+        if line.starts_with("DOMAIN_") {
+            continue;
+        }
+        let parts: Vec<_> = line.split_whitespace().collect();
+        if parts.len() >= 3 {
+            let r: f32 = parts[0].parse().map_err(|_| "bad cube RGB".to_string())?;
+            let g: f32 = parts[1].parse().map_err(|_| "bad cube RGB".to_string())?;
+            let b: f32 = parts[2].parse().map_err(|_| "bad cube RGB".to_string())?;
+            data.push([r, g, b]);
+        }
+    }
+    if size == 0 {
+        return Err("missing LUT_3D_SIZE".into());
+    }
+    if data.len() != size * size * size {
+        return Err(format!(
+            "expected {} RGB triples, got {}",
+            size * size * size,
+            data.len()
+        ));
+    }
+    Ok(CubeLut { size, data })
+}
+
+fn apply_cube(frame: &mut RgbaFrame, cube: &CubeLut, intensity: f32) {
+    if intensity <= 0.0 {
+        return;
+    }
+    let n = cube.size;
+    let max_i = (n - 1) as f32;
+    for px in frame.pixels.chunks_exact_mut(4) {
+        let r = px[0] as f32 / 255.0;
+        let g = px[1] as f32 / 255.0;
+        let b = px[2] as f32 / 255.0;
+        let mapped = sample_cube(cube, r, g, b, max_i);
+        px[0] = ((r + (mapped[0] - r) * intensity) * 255.0).clamp(0.0, 255.0) as u8;
+        px[1] = ((g + (mapped[1] - g) * intensity) * 255.0).clamp(0.0, 255.0) as u8;
+        px[2] = ((b + (mapped[2] - b) * intensity) * 255.0).clamp(0.0, 255.0) as u8;
+    }
+}
+
+fn sample_cube(cube: &CubeLut, r: f32, g: f32, b: f32, max_i: f32) -> [f32; 3] {
+    let n = cube.size;
+    let rf = (r * max_i).clamp(0.0, max_i);
+    let gf = (g * max_i).clamp(0.0, max_i);
+    let bf = (b * max_i).clamp(0.0, max_i);
+    let r0 = rf.floor() as usize;
+    let g0 = gf.floor() as usize;
+    let b0 = bf.floor() as usize;
+    let r1 = (r0 + 1).min(n - 1);
+    let g1 = (g0 + 1).min(n - 1);
+    let b1 = (b0 + 1).min(n - 1);
+    let tr = rf - r0 as f32;
+    let tg = gf - g0 as f32;
+    let tb = bf - b0 as f32;
+
+    let c000 = cube_at(cube, r0, g0, b0);
+    let c100 = cube_at(cube, r1, g0, b0);
+    let c010 = cube_at(cube, r0, g1, b0);
+    let c110 = cube_at(cube, r1, g1, b0);
+    let c001 = cube_at(cube, r0, g0, b1);
+    let c101 = cube_at(cube, r1, g0, b1);
+    let c011 = cube_at(cube, r0, g1, b1);
+    let c111 = cube_at(cube, r1, g1, b1);
+
+    let c00 = lerp3(c000, c100, tr);
+    let c10 = lerp3(c010, c110, tr);
+    let c01 = lerp3(c001, c101, tr);
+    let c11 = lerp3(c011, c111, tr);
+    let c0 = lerp3(c00, c10, tg);
+    let c1 = lerp3(c01, c11, tg);
+    lerp3(c0, c1, tb)
+}
+
+fn cube_at(cube: &CubeLut, r: usize, g: usize, b: usize) -> [f32; 3] {
+    let n = cube.size;
+    cube.data[r + g * n + b * n * n]
+}
+
+fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn parse_identity_cube() {
+        let dir = tempfile_dir();
+        let cube_path = dir.join("id.cube");
+        let mut f = std::fs::File::create(&cube_path).unwrap();
+        writeln!(f, "LUT_3D_SIZE 2").unwrap();
+        for b in 0..2 {
+            for g in 0..2 {
+                for r in 0..2 {
+                    writeln!(f, "{} {} {}", r as f32, g as f32, b as f32).unwrap();
+                }
+            }
+        }
+        let lut = parse_cube(&cube_path).unwrap();
+        assert_eq!(lut.size, 2);
+        assert_eq!(lut.data.len(), 8);
+    }
+
+    fn tempfile_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("renderly-pack-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+}

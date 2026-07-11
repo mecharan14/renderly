@@ -13,22 +13,22 @@ CI runs on Windows/macOS/Linux. Manual QA: [qa-checklist.md](qa-checklist.md).
 
 ```
                      ┌───────────────────┐
-                     │   uppercut-core     │   headless engine, no UI deps
+                     │   renderly-core     │   headless engine, no UI deps
                      │  (lib crate)        │
                      └─────────┬─────────┘
               ┌────────────────┼────────────────┐
               │                │                 │
    ┌──────────▼──────┐ ┌───────▼───────┐ ┌───────▼────────┐
-   │  uppercut-cli    │ │ uppercut-mcp   │ │ uppercut-app    │
+   │  renderly-cli    │ │ renderly-mcp   │ │ renderly-app    │
    │  (bin)           │ │ (bin, MCP       │ │ (bin, Tauri 2   │
    │                  │ │  server)        │ │  desktop app)   │
    └──────────────────┘ └────────────────┘ └────────────────┘
 ```
 
-Dependency direction is strictly downward: `uppercut-core` never imports from the other
-three. All three frontends depend on `uppercut-core` and nothing else depends on them.
+Dependency direction is strictly downward: `renderly-core` never imports from the other
+three. All three frontends depend on `renderly-core` and nothing else depends on them.
 
-## `uppercut-core`
+## `renderly-core`
 
 Owns:
 
@@ -51,7 +51,7 @@ Owns:
 Internal module boundaries (indicative, refine as code lands):
 
 ```
-uppercut-core/src/
+renderly-core/src/
   project/       schema types, versioning, (de)serialization
   commands/      Command enum, apply_command, per-command logic + unit tests
   media/         decode, encode, probe (FFmpeg)
@@ -60,7 +60,7 @@ uppercut-core/src/
   perceive/      frame render-to-image, transcript, scene/silence detection
 ```
 
-## `uppercut-cli`
+## `renderly-cli`
 
 Thin binary. Subcommands operate on a project JSON file on disk:
 
@@ -72,15 +72,15 @@ Thin binary. Subcommands operate on a project JSON file on disk:
 This is the simplest agent-drivable surface and the first thing Phase 0's milestone
 ("CLI renders a cuts-only timeline JSON to MP4") runs through.
 
-## `uppercut-mcp`
+## `renderly-mcp`
 
-MCP server (stdio, HTTP later) wrapping the same `uppercut-core` API as the CLI, plus
+MCP server (stdio, HTTP later) wrapping the same `renderly-core` API as the CLI, plus
 perception tools exposed as MCP tools. Built in Phase 1 — do not build ahead of the CLI
 proving the command API is sufficient.
 
-## `uppercut-app`
+## `renderly-app`
 
-Tauri 2 desktop app. Rust backend commands call into `uppercut-core` exactly like the CLI
+Tauri 2 desktop app. Rust backend commands call into `renderly-core` exactly like the CLI
 does — the Tauri command layer is another thin dispatcher, not a reimplementation.
 
 Two rendering surfaces coexist in one window:
@@ -90,8 +90,8 @@ Two rendering surfaces coexist in one window:
   PLAN.md §3 left the framework choice open — React was picked for its ecosystem and
   because the canvas-heavy timeline benefits from keeping React out of the hot render path
   entirely, see below). State lives in one Zustand store
-  (`uppercut-app/src/store/editorStore.ts`); components read it via selectors and never
-  call `invoke`/`listen` directly — `uppercut-app/src/lib/ipc.ts` is the *only* file that
+  (`renderly-app/src/store/editorStore.ts`); components read it via selectors and never
+  call `invoke`/`listen` directly — `renderly-app/src/lib/ipc.ts` is the *only* file that
   imports `@tauri-apps/api`, so the backend surface is typed and grep-auditable in one
   place (`docs/command-api.md`'s command builders live in `lib/commands.ts` next to it).
   The window is **frameless** (`decorations: false`) with a custom titlebar in `TopBar`
@@ -101,7 +101,7 @@ Two rendering surfaces coexist in one window:
   canvas colors read the same CSS vars through `timeline/theme.ts`.
 - **Native preview surface** — a wgpu child native window (Win32 HWND, AppKit NSView,
   Linux X11 child window, or Wayland `wl_subsurface`) receiving composited frames from
-  the playback engine in `uppercut-core`. Never proxies frames through the webview/JS
+  the playback engine in `renderly-core`. Never proxies frames through the webview/JS
   bridge. The surface is click-through so overlay controls stay interactive (X11:
   empty ShapeInput region; Wayland: empty `wl_region` input region). Preview bounds are
   synced from `#preview-host`'s letterboxed content rect (`set_preview_bounds`) so they
@@ -114,7 +114,7 @@ Two rendering surfaces coexist in one window:
   via `wl_subsurface.set_desync`.
 
 **Timeline architecture:** the canvas timeline is deliberately *not* a React render
-target. `uppercut-app/src/timeline/renderer.ts` is a pure `(canvas, state) => void` draw
+target. `renderly-app/src/timeline/renderer.ts` is a pure `(canvas, state) => void` draw
 function (colors sourced from `timeline/theme.ts`, which reads `styles/tokens.css` custom
 properties — no hex literals in `renderer.ts`, enforced by grep gate) and
 `timeline/interactions.ts` is a mouse-event state machine (hit-test → drag → commit-on-
@@ -143,7 +143,7 @@ dialog with progress bar / ETA / cancel (M6), M7 polish (Coming Soon panels, emp
 media skeletons, focus rings / scrollbars, `playback:error` toasts, pause-on-edit).
 Thumbnails/waveforms are M4. macOS/Linux native preview surfaces are implemented
 (Linux: X11 child window + Wayland `wl_subsurface` backends under
-`uppercut-app/src-tauri/src/preview/linux/`).
+`renderly-app/src-tauri/src/preview/linux/`).
 
 Tauri commands: `quick_start_project`, `new_project`, `open_project`, `save_project`,
 `get_project`, `apply_command`, `apply_commands`, `undo`, `redo`, `export_project`,
@@ -153,7 +153,7 @@ stays a sync `fn`**, deliberately — see the callout below. `apply_commands` (G
 M3) batches several `Command`s atomically — one project clone, one undo snapshot, one
 save, one `project:changed` emit — for gestures that are logically a single edit but need
 more than one core command (see command-api.md "Batch application"); it's a thin
-Tauri-layer convenience over `uppercut_core::apply_command`, not a second core API.
+Tauri-layer convenience over `renderly_core::apply_command`, not a second core API.
 `export_project` clones the project and never holds `edit_lock` during encode; it accepts
 preset shorthand (`"tiktok"` / `"youtube"`) or full `ExportPreset` JSON (including
 `Custom`), throttles `export:progress` to ~10 Hz, and cooperates with `cancel_export`.
@@ -170,7 +170,7 @@ hence "Not Responding".
 
 The fix has two parts:
 
-- **`uppercut_core::export::FrameRenderer`** — a persistent renderer that holds one wgpu
+- **`renderly_core::export::FrameRenderer`** — a persistent renderer that holds one wgpu
   `Compositor` and one open decoder per source media across repeated `render()` calls,
   instead of rebuilding both per call. `render_frame_at` is now a one-shot convenience
   wrapper around a throwaway `FrameRenderer`, fine for perception/MCP call sites that
@@ -180,7 +180,7 @@ The fix has two parts:
   `media::ReaderOptions`, applied via `VideoReader::open_with`) let playback decode at
   preview-panel resolution and at the project's fps instead of full source
   resolution/native fps.
-- **`uppercut-app/src-tauri/src/playback.rs::PlaybackEngine`** — owns two long-lived
+- **`renderly-app/src-tauri/src/playback.rs::PlaybackEngine`** — owns two long-lived
   workers, managed from `AppState`, so the four playback commands (`play`, `pause`,
   `seek`, `scrub_audio`) never block the async runtime's worker pool for more than a
   clone + a channel send:
@@ -231,9 +231,9 @@ only creation needs the main thread.
 
 ### Undo/redo
 
-`uppercut-app/src-tauri/src/lib.rs::History` is a bounded (100-entry) stack of full
+`renderly-app/src-tauri/src/lib.rs::History` is a bounded (100-entry) stack of full
 `Project` snapshots — `undo: Vec<Project>`, `redo: Vec<Project>` — held in `AppState`
-alongside the session, not in `uppercut-core`. `apply_command` pushes the *pre-mutation*
+alongside the session, not in `renderly-core`. `apply_command` pushes the *pre-mutation*
 project onto `undo` (and clears `redo`, as any new edit invalidates the old redo branch)
 only after the command has actually succeeded; `undo`/`redo` pop a snapshot, push the
 current project onto the other stack, and install the popped one as the session's project.
@@ -243,7 +243,7 @@ entry in the stack is a `Project` value that only ever came from a successful
 `apply_command` call (or a previous undo/redo) — restoring one doesn't construct or mutate
 project state through any path other than that. It's app-session-layer state management
 (what to show right now), not a second way to edit a project. The command-log-based
-undo/redo `uppercut-core` eventually wants (see command-api.md's `Export` note on
+undo/redo `renderly-core` eventually wants (see command-api.md's `Export` note on
 serializable commands) is a different, more powerful mechanism (replay/audit/collab) that
 can replace this later without changing the contract GUI/CLI/MCP see.
 
@@ -303,9 +303,9 @@ call or from undo/redo.
 
 ### Media assets (thumbnails + waveforms, M4)
 
-`uppercut-app/src-tauri/src/media_assets.rs` generates and caches a tiled thumbnail-strip
-PNG (`uppercut_core::generate_thumbnail_strip` — one ffmpeg call, not one spawn per
-thumbnail) and waveform peaks (`uppercut_core::audio_peaks`, reused as-is from the
+`renderly-app/src-tauri/src/media_assets.rs` generates and caches a tiled thumbnail-strip
+PNG (`renderly_core::generate_thumbnail_strip` — one ffmpeg call, not one spawn per
+thumbnail) and waveform peaks (`renderly_core::audio_peaks`, reused as-is from the
 perception module) for each imported media item, entirely off the edit path: it's a plain
 `tauri::async_runtime::spawn` task, not gated by `AppState::edit_lock`, so importing media
 or opening a project with many items never slows down `apply_command`/`undo`/`redo`.

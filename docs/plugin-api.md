@@ -60,11 +60,11 @@ No host imports in v1. The module must not require WASI.
 Regenerate WASM bytes:
 
 ```rust
-let bytes = uppercut_core::compile_invert_wasm()?;
+let bytes = renderly_core::compile_invert_wasm()?;
 // or compile_gain_wasm()
 ```
 
-Or: `cargo run -p uppercut-core --example write_gain_wasm`.
+Or: `cargo run -p renderly-core --example write_gain_wasm`.
 
 ## Commands
 

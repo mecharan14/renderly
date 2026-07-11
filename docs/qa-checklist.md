@@ -1,6 +1,6 @@
 # Manual QA checklist (GUI rebuild M7)
 
-Run after a fresh clone (`npm i && npm run tauri dev` from `uppercut-app/`). Mark each
+Run after a fresh clone (`npm i && npm run tauri dev` from `renderly-app/`). Mark each
 item pass/fail. Failures that crash the app or freeze the window are blockers.
 
 ## Smoke

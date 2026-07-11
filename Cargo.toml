@@ -1,17 +1,17 @@
 [workspace]
 resolver = "2"
 members = [
-    "uppercut-core",
-    "uppercut-cli",
-    "uppercut-mcp",
-    "uppercut-app/src-tauri",
+    "renderly-core",
+    "renderly-cli",
+    "renderly-mcp",
+    "renderly-app/src-tauri",
 ]
 
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/uppercut-editor/uppercut"
+repository = "https://github.com/mecharan14/renderly"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -21,4 +21,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 
-uppercut-core = { path = "uppercut-core" }
+renderly-core = { path = "renderly-core" }

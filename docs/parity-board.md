@@ -7,8 +7,8 @@ GUI/CLI/MCP reachability.
 | ID | Feature | Status | Spec / entry points |
 |----|---------|--------|---------------------|
 | P4-0 | Phase 3 baseline landed; architecture status current | done | [architecture.md](architecture.md) |
-| P4-1a | Shared `ClipMask` + compositor alpha path | done | schema v6; `SetClipMask`; `uppercut-core/src/mask.rs` |
-| P4-1b | Local background removal (heuristic + optional `UPPERCUT_SEG_CLI`) | done | `SetClipBackgroundRemoval`, `GenerateBackgroundMatte`; `segmentation/` |
+| P4-1a | Shared `ClipMask` + compositor alpha path | done | schema v6; `SetClipMask`; `renderly-core/src/mask.rs` |
+| P4-1b | Local background removal (heuristic + optional `RENDERLY_SEG_CLI`) | done | `SetClipBackgroundRemoval`, `GenerateBackgroundMatte`; `segmentation/` |
 | P4-2 | Audio denoise (`afftdn`) on audio-track clips | done | `SetClipAudioDenoise`; audio-track-only v1 |
 | P4-3 | Chroma key builtin | done | `builtin:chroma_key`; Effects panel |
 | P4-3b | Shape mask authoring (rect/ellipse UI polish) | done | Mask tool (M); `PreviewMaskOverlay`; inspector enable/invert/feather/shape; `preview_mask_override` |
@@ -24,6 +24,6 @@ GUI/CLI/MCP reachability.
 ## Inference runtime decision (recorded)
 
 Current WASM frame plugins instantiate per call and copy full RGBA — unsuitable for
-RVM/BiRefNet. Phase 4.1 uses **heuristic mattes** plus optional **`UPPERCUT_SEG_CLI`**
+RVM/BiRefNet. Phase 4.1 uses **heuristic mattes** plus optional **`RENDERLY_SEG_CLI`**
 (Whisper-style). Linking `ort` / ONNX remains a follow-up after AGPL-compatible license
 review — never as a user-loadable native DLL plugin.

@@ -1,0 +1,18 @@
+[package]
+name = "renderly-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI for Renderly: the simplest agent-drivable surface over renderly-core's command API. See docs/command-api.md."
+
+[[bin]]
+name = "renderly"
+path = "src/main.rs"
+
+[dependencies]
+renderly-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+uuid.workspace = true

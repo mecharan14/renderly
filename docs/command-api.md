@@ -1,7 +1,7 @@
 # Command API
 
 Status: **current** (matches project schema v6). This is the source of truth for the `Command` enum and
-`apply_command` in `uppercut-core`. GUI, CLI, and MCP must all dispatch through this exact
+`apply_command` in `renderly-core`. GUI, CLI, and MCP must all dispatch through this exact
 set (see AGENTS.md §0.1) — none of them may mutate `Project` state any other way.
 
 ## Shape
@@ -158,7 +158,7 @@ transcript segment to `track_id` (must be a caption track). Segments are placed 
 Uses `style_id` for export burn-in (built-in: `tiktok-bold-yellow`, `tiktok-minimal`,
 `tiktok-box`, `youtube-lower-thirds`).
 
-Requires `whisper-cli` (or `whisper`) on PATH and `UPPERCUT_WHISPER_MODEL` pointing at a
+Requires `whisper-cli` (or `whisper`) on PATH and `RENDERLY_WHISPER_MODEL` pointing at a
 ggml model file.
 
 - Errors: track/media not found, track kind mismatch, caption overlap, Whisper unavailable.
@@ -170,7 +170,7 @@ with `media_id` and `clip_id`.
 
 `VoiceoverProvider` variants (JSON tag `provider`):
 
-- `piper_local` — local Piper ONNX via `piper` CLI; requires `UPPERCUT_PIPER_MODEL`.
+- `piper_local` — local Piper ONNX via `piper` CLI; requires `RENDERLY_PIPER_MODEL`.
 - `open_ai` — OpenAI TTS (`tts-1`); requires `OPENAI_API_KEY` (BYO, opt-in).
 
 - Errors: track not found or not audio, TTS unavailable, overlap, probe/import failure.
@@ -272,7 +272,7 @@ audio (with fades and optional music ducking) and burns caption clips. Video lay
 evaluated transform+opacity, speed, transitions, and effects (builtin / pack / wasm).
 
 `Export` does not mutate `Project`. Progress / cancel for interactive clients go through
-`uppercut_core::export::export_project_with_progress` (GUI Tauri command + CLI status
+`renderly_core::export::export_project_with_progress` (GUI Tauri command + CLI status
 line); `apply_command(Command::Export)` and MCP still call the fire-and-forget
 `export_project` wrapper. Returning `false` from the progress callback yields
 `ExportError::Cancelled` and removes the export temp directory.
@@ -287,8 +287,8 @@ a single edit but need more than one `Command` — the motivating case is CapCut
 auto-track-on-drop: dropping a media card below the last timeline track dispatches
 `[AddTrack{id: Some(new_id)}, AddClip{track_id: new_id, ...}]` as one batch, so undo
 removes both the track and the clip together instead of leaving an empty track behind.
-`apply_commands` is Tauri/GUI-layer only (`uppercut-app/src-tauri/src/lib.rs`), not part
-of `uppercut-core`'s public API — CLI and MCP keep calling `apply_command` once per
+`apply_commands` is Tauri/GUI-layer only (`renderly-app/src-tauri/src/lib.rs`), not part
+of `renderly-core`'s public API — CLI and MCP keep calling `apply_command` once per
 command, which is sufficient for scripted/agent use.
 
 ## Non-goals (later)

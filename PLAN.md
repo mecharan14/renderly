@@ -1,6 +1,6 @@
-# Uppercut — Open-Source, AI-Native Video Editor
+# Renderly — Open-Source, AI-Native Video Editor
 
-> Working name: **Uppercut** — punchy, gaming-adjacent (fighting-game energy), with "cut" built right in.
+> Working name: **Renderly** — punchy, gaming-adjacent (fighting-game energy), with "cut" built right in.
 > Alternates if it conflicts later: **Smashcut**, **Reelforge**, **Crosscut**.
 > Positioning: "The video editor built for AI agents — and the humans who finish the job."
 > Never market as a CapCut clone. Say: *an open-source alternative to paywalled editors*.
@@ -23,13 +23,13 @@ These four decisions make or break the project — everything else is negotiable
 
 2. **Text-first project format.** The project file is stable, documented, human-readable JSON. An AI can read and reason about the whole edit; git can diff it; the community can build tooling around it. Support OpenTimelineIO import/export for interop with pro tools.
 
-3. **The engine never touches the UI.** `uppercut-core` is a headless Rust library. The Tauri app, the MCP server, and the CLI are all thin frontends. The engine must be able to render an entire video with no window open.
+3. **The engine never touches the UI.** `renderly-core` is a headless Rust library. The Tauri app, the MCP server, and the CLI are all thin frontends. The engine must be able to render an entire video with no window open.
 
 4. **AI needs eyes.** The MCP server exposes not just edit commands but *perception*: render frame N as an image, get audio waveform peaks, get the transcript, run scene/silence detection. A model that can see its output can iterate; one that can't is editing blind. This is the killer feature no existing editor has.
 
 ## 3. Tech stack
 
-### Engine — Rust (`uppercut-core`)
+### Engine — Rust (`renderly-core`)
 
 | Concern | Choice | Notes |
 |---|---|---|
@@ -43,14 +43,14 @@ These four decisions make or break the project — everything else is negotiable
 | Project model | `serde` JSON, versioned schema | Command-sourced edits; OTIO interop. |
 | Plugins | `wasmtime` (WASM) | See §5. |
 
-### App — Tauri 2 (`uppercut-app`)
+### App — Tauri 2 (`renderly-app`)
 
 - **Frontend:** Svelte (or React — pick by contributor comfort; Svelte is lighter for a canvas-heavy app) + TypeScript.
 - **Timeline:** custom canvas-rendered timeline (virtualized; never DOM-per-clip).
 - **Video preview: native, not webview.** The preview viewport is a native `wgpu` surface embedded in the window (child window via raw-window-handle). Frames go GPU→screen and never cross the webview bridge. This is the difference between "blazingly fast" and "electron-feeling".
 - Webview is only chrome: panels, inspectors, dialogs, media bin.
 
-### AI interface (`uppercut-mcp`, `uppercut-cli`)
+### AI interface (`renderly-mcp`, `renderly-cli`)
 
 MCP server (stdio + optionally HTTP) shipping with the app. Tool surface, roughly:
 
@@ -109,11 +109,11 @@ Two tiers, so non-programmers can contribute too:
 
 **WASM plugins (code, any language that targets WASM).** Sandboxed via wasmtime with a capability-based API: frame effects (pixel/GPU-param access), audio effects, generators, analyzers, and integration plugins (e.g., "fetch assets from X", new export targets). Sandboxing means users can safely install community plugins — a real differentiator vs. native plugin editors.
 
-Registry strategy: start with a `uppercut-registry` GitHub repo (PR to publish, CI validates manifests), add in-app browsing/install once the format is stable. Don't build registry infrastructure before there are plugins.
+Registry strategy: start with a `renderly-registry` GitHub repo (PR to publish, CI validates manifests), add in-app browsing/install once the format is stable. Don't build registry infrastructure before there are plugins.
 
 ## 6. Community & growth strategy
 
-- **Dogfood loudly.** Every Ultra Bruno video is made with Uppercut and says so. "This video was edited by Claude" is irresistible content on its own.
+- **Dogfood loudly.** Every Ultra Bruno video is made with Renderly and says so. "This video was edited by Claude" is irresistible content on its own.
 - **Lead with the AI angle.** Kdenlive/Shotcut/Olive already exist as open-source editors; none are AI-drivable. The MCP-first design is your wedge — launch on the strength of the Phase 1 demo (Show HN, r/rust, r/VideoEditing, X, the MCP ecosystem lists).
 - **Lower the contribution floor.** Asset packs mean designers/creators contribute without touching Rust. Keep `good-first-issue` stocked; ship plugin/asset templates.
 - **Docs as a feature.** The project format spec, command API reference, and MCP instructions are documented from day one — for both human contributors and AI agents.
@@ -127,11 +127,11 @@ Registry strategy: start with a `uppercut-registry` GitHub repo (PR to publish, 
 | Webview UI feels slow | Native preview surface; canvas timeline; measure from day one. If Tauri truly can't keep up, the engine/UI split makes a UI swap survivable. |
 | FFmpeg/codec licensing | Dynamically link LGPL FFmpeg; document patent-encumbered codec handling per platform. |
 | Solo burnout | Every phase ends in a tool you personally benefit from; launch community at Phase 1, not Phase 4. |
-| Name collisions | Trademark-check "Uppercut" before the public launch; alternates listed at top. |
+| Name collisions | Trademark-check "Renderly" before the public launch; alternates listed at top. |
 
 ## 8. Immediate next steps
 
-1. Scaffold the workspace: `uppercut-core`, `uppercut-cli`, `uppercut-mcp`, `uppercut-app` crates/packages.
+1. Scaffold the workspace: `renderly-core`, `renderly-cli`, `renderly-mcp`, `renderly-app` crates/packages.
 2. Define project schema v0 + first 10 commands (import, add-clip, split, trim, move, delete, add-caption, set-audio-gain, add-track, export).
 3. Spike the media spine: decode a gameplay MP4 → wgpu → re-encode. Everything depends on this working well on your machine (test NVENC).
 4. Write `AGENTS.md` so Claude Code can start driving the CLI the moment it exists.

@@ -4,7 +4,7 @@
 //! ```
 //! rustc --crate-type cdylib -O --target wasm32-unknown-unknown -o invert.wasm invert.rs
 //! ```
-//! Or regenerate via the host: `uppercut_core::plugins::compile_invert_wasm()`.
+//! Or regenerate via the host: `renderly_core::plugins::compile_invert_wasm()`.
 //!
 //! ABI: export `memory` and `process(ptr, len, width, height)` which inverts RGB in place.
 

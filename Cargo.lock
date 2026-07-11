@@ -4182,6 +4182,79 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
+name = "renderly-app"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "parking_lot",
+ "pollster",
+ "raw-window-handle",
+ "renderly-core",
+ "rodio",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "thiserror 1.0.69",
+ "uuid",
+ "wayland-backend",
+ "wayland-client",
+ "wgpu",
+ "windows 0.62.2",
+ "x11",
+]
+
+[[package]]
+name = "renderly-cli"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "renderly-core",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "renderly-core"
+version = "0.0.1"
+dependencies = [
+ "ab_glyph",
+ "bytemuck",
+ "image",
+ "pollster",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "uuid",
+ "wasmtime",
+ "wat",
+ "wgpu",
+]
+
+[[package]]
+name = "renderly-mcp"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "renderly-core",
+ "rmcp",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "reqwest"
 version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5946,79 +6019,6 @@ name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
-
-[[package]]
-name = "uppercut-app"
-version = "0.0.1"
-dependencies = [
- "bytemuck",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
- "parking_lot",
- "pollster",
- "raw-window-handle",
- "rodio",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "thiserror 1.0.69",
- "uppercut-core",
- "uuid",
- "wayland-backend",
- "wayland-client",
- "wgpu",
- "windows 0.62.2",
- "x11",
-]
-
-[[package]]
-name = "uppercut-cli"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "clap",
- "serde",
- "serde_json",
- "uppercut-core",
- "uuid",
-]
-
-[[package]]
-name = "uppercut-core"
-version = "0.0.1"
-dependencies = [
- "ab_glyph",
- "bytemuck",
- "image",
- "pollster",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "uuid",
- "wasmtime",
- "wat",
- "wgpu",
-]
-
-[[package]]
-name = "uppercut-mcp"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "rmcp",
- "schemars 1.2.1",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uppercut-core",
- "uuid",
-]
 
 [[package]]
 name = "url"

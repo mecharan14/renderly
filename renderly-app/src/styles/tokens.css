@@ -1,0 +1,63 @@
+/* Design tokens — professional charcoal + ember accent (Renderly-owned, not CapCut teal).
+   Timeline canvas colors must read these via timeline/theme.ts — see docs/architecture.md. */
+:root {
+  color-scheme: dark;
+
+  --bg-0: #0a0a0b;
+  --bg-1: #111113;
+  --bg-2: #18181b;
+  --bg-3: #222226;
+  --border: #27272a;
+  --border-strong: #3f3f46;
+
+  --text-1: #fafafa;
+  --text-2: #a1a1aa;
+  --text-3: #71717a;
+
+  --accent: #ff5a3d;
+  --accent-hover: #ff735c;
+  --accent-active: #e8452a;
+  --accent-soft: rgba(255, 90, 61, 0.14);
+  --on-accent: #1a0603;
+
+  --danger: #ef4444;
+  --danger-soft: rgba(239, 68, 68, 0.14);
+  --warning: #f59e0b;
+  --success: #22c55e;
+
+  --clip-video-bg: #1e2430;
+  --clip-audio-bg: #1a2220;
+  --clip-audio-wave: #5eead4;
+  --clip-caption-bg: #3b2f5c;
+  --clip-border-selected: var(--accent);
+
+  --playhead: #fafafa;
+  --snap-guide: var(--accent);
+  --ruler-text: var(--text-3);
+  --ruler-bg: #0e0e10;
+  --timeline-bg: #080809;
+  --track-header-bg: #141416;
+  --track-lane-bg: #0e0e10;
+
+  --radius-s: 3px;
+  --radius-m: 5px;
+  --radius-l: 8px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+
+  --font-ui: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  --fs-11: 11px;
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-15: 15px;
+
+  --shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  --track-label-w: 88px;
+  --ruler-h: 24px;
+  --timeline-h: 220px;
+  --titlebar-h: 40px;
+}

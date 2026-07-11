@@ -2,10 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "uppercut-app-dev",
+      "name": "renderly-app-dev",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
-      "cwd": "uppercut-app",
+      "cwd": "renderly-app",
       "port": 1420
     }
   ]

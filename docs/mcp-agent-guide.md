@@ -1,12 +1,12 @@
 # MCP agent guide
 
-Status: **Phase 1 complete**. `uppercut-mcp` exposes the command API and read-only perception tools
-over stdio. Every edit tool wraps `uppercut_core::apply_command` — see [command-api.md](command-api.md).
+Status: **Phase 1 complete**. `renderly-mcp` exposes the command API and read-only perception tools
+over stdio. Every edit tool wraps `renderly_core::apply_command` — see [command-api.md](command-api.md).
 
 ## Running the server
 
 ```sh
-cargo run -p uppercut-mcp
+cargo run -p renderly-mcp
 ```
 
 Configure in Cursor / Claude Desktop MCP settings:
@@ -14,9 +14,9 @@ Configure in Cursor / Claude Desktop MCP settings:
 ```json
 {
   "mcpServers": {
-    "uppercut": {
+    "renderly": {
       "command": "cargo",
-      "args": ["run", "-p", "uppercut-mcp", "--quiet"],
+      "args": ["run", "-p", "renderly-mcp", "--quiet"],
       "cwd": "/path/to/video-editor"
     }
   }
@@ -29,10 +29,10 @@ Logging goes to **stderr**; stdout is reserved for MCP JSON-RPC.
 
 | Variable | Purpose |
 |---|---|
-| `UPPERCUT_WHISPER_MODEL` | Path to whisper.cpp `ggml-*.bin` model for `get_transcript` / `GenerateCaptions` |
-| `UPPERCUT_FONT_PATH` | Optional `.ttf` for caption burn-in (defaults to system font) |
-| `UPPERCUT_PIPER_MODEL` | Piper ONNX model for `GenerateVoiceover` with `piper_local` provider |
-| `UPPERCUT_PIPER_CONFIG` | Optional Piper voice config JSON |
+| `RENDERLY_WHISPER_MODEL` | Path to whisper.cpp `ggml-*.bin` model for `get_transcript` / `GenerateCaptions` |
+| `RENDERLY_FONT_PATH` | Optional `.ttf` for caption burn-in (defaults to system font) |
+| `RENDERLY_PIPER_MODEL` | Piper ONNX model for `GenerateVoiceover` with `piper_local` provider |
+| `RENDERLY_PIPER_CONFIG` | Optional Piper voice config JSON |
 | `OPENAI_API_KEY` | BYO OpenAI TTS for `GenerateVoiceover` with `open_ai` provider |
 | PATH must include | `ffmpeg`, `ffprobe`; optional `whisper-cli` (or `whisper`) for STT; optional `piper` for local TTS |
 
@@ -42,7 +42,7 @@ Logging goes to **stderr**; stdout is reserved for MCP JSON-RPC.
 
 | Tool | Description |
 |---|---|
-| `new_project` | Create and open a `.uppercut.json` file |
+| `new_project` | Create and open a `.renderly.json` file |
 | `open_project` | Load an existing project |
 | `get_project` | Return current project JSON |
 
@@ -69,7 +69,7 @@ Phase 1's `GenerateCaptions`, `GenerateVoiceover`, `SetAudioFade`, and `SetTrack
 
 ## Worked example: script + footage → export
 
-Assume gameplay MP4s in `C:/footage/` and a project at `edit.uppercut.json`.
+Assume gameplay MP4s in `C:/footage/` and a project at `edit.renderly.json`.
 
 1. **Create project** — `new_project { path, name, width, height, fps }`
 2. **Import each clip** — `apply_command { command: { "command":"ImportMedia", "path":"..." } }`

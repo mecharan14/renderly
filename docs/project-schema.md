@@ -1,12 +1,12 @@
 # Project schema — v6
 
-Status: **current**. This is the source of truth for `uppercut-core`'s project
-model. Implementation types in `uppercut-core/src/project/` must match this document; if
+Status: **current**. This is the source of truth for `renderly-core`'s project
+model. Implementation types in `renderly-core/src/project/` must match this document; if
 they diverge, fix whichever one is wrong and note it in the same PR. Schema changes bump
 `schema_version` and are documented in the "Version history" section at the bottom.
 
 The project file is a single JSON document, human-readable, git-diffable, on disk with
-extension `.uppercut.json`.
+extension `.renderly.json`.
 
 ## Top-level shape
 

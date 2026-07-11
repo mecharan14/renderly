@@ -1,10 +1,10 @@
-# Uppercut extension registry (seed)
+# Renderly extension registry (seed)
 
 Curated, machine-readable index of example asset packs and WASM plugins that ship with
 this repository. See [`index.json`](index.json).
 
 Community contributions: open a PR adding an entry that points at a pack/plugin directory
-with a valid `pack.json` / `plugin.json`. A future dedicated `uppercut-registry` GitHub
+with a valid `pack.json` / `plugin.json`. A future dedicated `renderly-registry` GitHub
 repo may host remote URLs; until then, this file is the local seed.
 
 ## `index.json` fields
