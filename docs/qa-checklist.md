@@ -38,15 +38,27 @@ item pass/fail. Failures that crash the app or freeze the window are blockers.
       count stays flat (PlaybackEngine, not per-frame spawn)
 - [ ] Edit while playing pauses playback cleanly (no stuck audio)
 - [ ] Kill `ffmpeg` mid-play → toast via `playback:error`, app does not crash
-- [ ] Coming Soon tabs (Stickers/Effects/…) show Phase 3 pitch, not a blank panel
+- [ ] Stickers / Effects / Transitions / Filters / Adjust / Extensions panels work (no Coming Soon stubs)
 - [ ] Empty timeline / empty media / empty audio show clear empty states
+- [ ] Stickers place on a Stickers overlay track without overlap errors on Video 1
+- [ ] Extensions can Load the starter pack and gain/invert plugins from the local registry
+
+## Phase 4 (as features land)
+
+- [ ] Clip mask / chroma key / background removal affect preview and export alpha
+- [ ] **Mask tool (M):** paused preview — drag to create rect (Shift=ellipse, Alt=from
+      center); move/resize handles; inspector Enable / Invert / Feather / shape switch;
+      undo after mouseup commit (live drag does not spam undo); play hides overlay;
+      Select (V) restores transform handles; Windows preview click-through still works
+- [ ] Audio denoise (afftdn) on an audio-track clip survives export
+- [ ] Templates apply via command; multicam angle switch changes active angle
 
 ## Shortcuts quick check
 
 | Key | Action |
 |---|---|
 | Space | Play / pause |
-| V / C | Select / razor tool |
+| V / C / M | Select / razor / mask tool |
 | S | Split at playhead |
 | ← / → | Step ±1 frame |
 | Ctrl+Z / Y | Undo / redo |

@@ -4,9 +4,10 @@
 use crate::audio::{synthesize_to_wav, VoiceoverProvider};
 use crate::media::{self, MediaError};
 use crate::project::{
-    clone_effects_with_new_ids, split_keyframes, AnimProperty, CaptionClip, Clip, ClipTransform,
-    ClipTransition, EffectInstance, Id, KeyframeTrack, MediaClip, Project, Track, TrackAudioRole,
-    TrackKind, TransitionKind,
+    clone_effects_with_new_ids, split_keyframes, AnimProperty, AudioDenoise, BackgroundRemoval,
+    CaptionClip, Clip, ClipMask, ClipMaskKind, ClipTransform, ClipTransition, Easing,
+    EffectInstance, Id, Keyframe, KeyframeTrack, MediaClip, MulticamGroup, Project, Track,
+    TrackAudioRole, TrackKind, TransitionKind,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -197,6 +198,69 @@ pub enum Command {
         track_id: Id,
         position_secs: f64,
     },
+    /// Set or clear the clip mask (Phase 4).
+    SetClipMask {
+        track_id: Id,
+        clip_id: Id,
+        mask: Option<ClipMask>,
+    },
+    /// Set or clear background-removal config (Phase 4).
+    SetClipBackgroundRemoval {
+        track_id: Id,
+        clip_id: Id,
+        config: Option<BackgroundRemoval>,
+    },
+    /// Bake a single-frame matte for background removal and wire `mask` (Phase 4).
+    GenerateBackgroundMatte {
+        track_id: Id,
+        clip_id: Id,
+    },
+    /// Set or clear audio denoise on an audio-track clip (Phase 4).
+    SetClipAudioDenoise {
+        track_id: Id,
+        clip_id: Id,
+        config: Option<AudioDenoise>,
+    },
+    /// Apply a pack template's command sequence at a timeline offset (Phase 4).
+    ApplyTemplate {
+        pack_id: String,
+        template_id: String,
+        position_secs: f64,
+    },
+    /// Generate a simple sticker PNG from a prompt and place it on a video track (Phase 4).
+    GenerateSticker {
+        prompt: String,
+        track_id: Id,
+        position_secs: f64,
+        output_path: String,
+    },
+    /// Create a multicam group from existing clip ids (Phase 4).
+    CreateMulticamGroup {
+        name: String,
+        clip_ids: Vec<Id>,
+    },
+    /// Switch the active angle in a multicam group (Phase 4).
+    SetMulticamAngle {
+        group_id: Id,
+        active_angle: usize,
+    },
+    /// Sample bright-pixel centroids and write PosX/PosY tracking keyframes (Phase 4).
+    TrackMotion {
+        track_id: Id,
+        clip_id: Id,
+        sample_count: u32,
+    },
+    /// Stabilize by counteracting sampled centroid motion with PosX/PosY keys (Phase 4).
+    StabilizeClip {
+        track_id: Id,
+        clip_id: Id,
+    },
+    /// Scale/offset transform to approximate a center-crop for `target_aspect` (Phase 4).
+    AutoReframeClip {
+        track_id: Id,
+        clip_id: Id,
+        target_aspect: f64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,6 +344,16 @@ pub enum CommandError {
     AssetPack(String),
     #[error("wasm plugin error: {0}")]
     WasmPlugin(String),
+    #[error("invalid mask: {0}")]
+    InvalidMask(String),
+    #[error("invalid denoise: {0}")]
+    InvalidDenoise(String),
+    #[error("template error: {0}")]
+    Template(String),
+    #[error("multicam error: {0}")]
+    Multicam(String),
+    #[error("analysis error: {0}")]
+    Analysis(String),
     #[error("not yet implemented: {0}")]
     NotImplemented(&'static str),
 }
@@ -455,6 +529,53 @@ pub fn apply_command(project: &mut Project, cmd: Command) -> Result<CommandOutco
             track_id,
             position_secs,
         } => add_sfx_from_pack(project, &pack_id, &sfx_id, track_id, position_secs),
+        Command::SetClipMask {
+            track_id,
+            clip_id,
+            mask,
+        } => set_clip_mask(project, track_id, clip_id, mask),
+        Command::SetClipBackgroundRemoval {
+            track_id,
+            clip_id,
+            config,
+        } => set_clip_background_removal(project, track_id, clip_id, config),
+        Command::GenerateBackgroundMatte { track_id, clip_id } => {
+            generate_background_matte(project, track_id, clip_id)
+        }
+        Command::SetClipAudioDenoise {
+            track_id,
+            clip_id,
+            config,
+        } => set_clip_audio_denoise(project, track_id, clip_id, config),
+        Command::ApplyTemplate {
+            pack_id,
+            template_id,
+            position_secs,
+        } => apply_template(project, &pack_id, &template_id, position_secs),
+        Command::GenerateSticker {
+            prompt,
+            track_id,
+            position_secs,
+            output_path,
+        } => generate_sticker(project, &prompt, track_id, position_secs, &output_path),
+        Command::CreateMulticamGroup { name, clip_ids } => {
+            create_multicam_group(project, name, clip_ids)
+        }
+        Command::SetMulticamAngle {
+            group_id,
+            active_angle,
+        } => set_multicam_angle(project, group_id, active_angle),
+        Command::TrackMotion {
+            track_id,
+            clip_id,
+            sample_count,
+        } => track_motion(project, track_id, clip_id, sample_count),
+        Command::StabilizeClip { track_id, clip_id } => stabilize_clip(project, track_id, clip_id),
+        Command::AutoReframeClip {
+            track_id,
+            clip_id,
+            target_aspect,
+        } => auto_reframe_clip(project, track_id, clip_id, target_aspect),
     }
 }
 
@@ -1561,6 +1682,594 @@ fn add_sfx_from_pack(
     let probed = media::probe(&asset)?;
     let dur = probed.duration_secs.unwrap_or(1.0).max(0.1);
     add_clip(project, track_id, media_id, position_secs, 0.0, dur)
+}
+
+fn validate_mask(mask: &ClipMask) -> Result<(), CommandError> {
+    if !mask.feather.is_finite() || !(0.0..=1.0).contains(&mask.feather) {
+        return Err(CommandError::InvalidMask(
+            "feather must be finite and in 0..=1".into(),
+        ));
+    }
+    match &mask.kind {
+        ClipMaskKind::None | ClipMaskKind::Raster { .. } | ClipMaskKind::Generated { .. } => Ok(()),
+        ClipMaskKind::Rect {
+            x,
+            y,
+            width,
+            height,
+        } => {
+            if ![x, y, width, height].iter().all(|v| v.is_finite()) {
+                return Err(CommandError::InvalidMask(
+                    "rect fields must be finite".into(),
+                ));
+            }
+            if *width <= 0.0 || *height <= 0.0 {
+                return Err(CommandError::InvalidMask(
+                    "rect width/height must be > 0".into(),
+                ));
+            }
+            Ok(())
+        }
+        ClipMaskKind::Ellipse { cx, cy, rx, ry } => {
+            if ![cx, cy, rx, ry].iter().all(|v| v.is_finite()) {
+                return Err(CommandError::InvalidMask(
+                    "ellipse fields must be finite".into(),
+                ));
+            }
+            if *rx <= 0.0 || *ry <= 0.0 {
+                return Err(CommandError::InvalidMask(
+                    "ellipse radii must be > 0".into(),
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn set_clip_mask(
+    project: &mut Project,
+    track_id: Id,
+    clip_id: Id,
+    mask: Option<ClipMask>,
+) -> Result<CommandOutcome, CommandError> {
+    if let Some(ref m) = mask {
+        validate_mask(m)?;
+    }
+    let clip = media_clip_mut(project, track_id, clip_id)?;
+    clip.mask = mask;
+    Ok(CommandOutcome::Applied)
+}
+
+fn set_clip_background_removal(
+    project: &mut Project,
+    track_id: Id,
+    clip_id: Id,
+    config: Option<BackgroundRemoval>,
+) -> Result<CommandOutcome, CommandError> {
+    if let Some(ref cfg) = config {
+        if !cfg.threshold.is_finite() || !(0.0..=1.0).contains(&cfg.threshold) {
+            return Err(CommandError::InvalidMask(
+                "background removal threshold must be in 0..=1".into(),
+            ));
+        }
+        if !cfg.feather.is_finite() || !(0.0..=1.0).contains(&cfg.feather) {
+            return Err(CommandError::InvalidMask(
+                "background removal feather must be in 0..=1".into(),
+            ));
+        }
+    }
+    let clip = media_clip_mut(project, track_id, clip_id)?;
+    clip.background_removal = config;
+    Ok(CommandOutcome::Applied)
+}
+
+fn default_background_removal() -> BackgroundRemoval {
+    BackgroundRemoval {
+        enabled: true,
+        model_id: "heuristic".into(),
+        threshold: 0.15,
+        feather: 0.0,
+        temporal: false,
+        matte_cache_dir: None,
+    }
+}
+
+fn decode_clip_frame(
+    project: &Project,
+    clip: &MediaClip,
+    source_time: f64,
+) -> Result<crate::media::RgbaFrame, CommandError> {
+    let media = project
+        .find_media(clip.media_id)
+        .ok_or(CommandError::MediaNotFound(clip.media_id))?;
+    match media.kind {
+        crate::project::MediaKind::Image => {
+            let img = image::open(&media.path)
+                .map_err(|e| CommandError::Analysis(e.to_string()))?
+                .to_rgba8();
+            Ok(crate::media::RgbaFrame {
+                width: img.width(),
+                height: img.height(),
+                pixels: img.into_raw(),
+            })
+        }
+        crate::project::MediaKind::Video => {
+            let mut reader = crate::media::VideoReader::open(&media.path, source_time.max(0.0))
+                .map_err(|e| CommandError::Analysis(e.to_string()))?;
+            reader
+                .read_frame()
+                .map_err(|e| CommandError::Analysis(e.to_string()))?
+                .ok_or_else(|| CommandError::Analysis("no frame decoded".into()))
+        }
+        crate::project::MediaKind::Audio => Err(CommandError::Analysis(
+            "clip media has no video frames".into(),
+        )),
+    }
+}
+
+fn generate_background_matte(
+    project: &mut Project,
+    track_id: Id,
+    clip_id: Id,
+) -> Result<CommandOutcome, CommandError> {
+    let track = project
+        .find_track(track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    if track.kind != TrackKind::Video {
+        return Err(CommandError::TrackKindMismatch(
+            track_id,
+            track.kind,
+            TrackKind::Video,
+        ));
+    }
+    let clip = track
+        .clips
+        .iter()
+        .find(|c| c.id() == clip_id)
+        .ok_or(CommandError::ClipNotFound(clip_id, track_id))?
+        .as_media()
+        .ok_or(CommandError::NotMediaClip(clip_id))?
+        .clone();
+
+    let mid_source = (clip.source_in_secs + clip.source_out_secs) * 0.5;
+    let frame = decode_clip_frame(project, &clip, mid_source)?;
+
+    let mut cfg = clip
+        .background_removal
+        .clone()
+        .unwrap_or_else(default_background_removal);
+    cfg.enabled = true;
+
+    let cache_dir = std::env::temp_dir().join(format!(
+        "uppercut-matte-{}",
+        crate::segmentation::cache_key(clip.media_id, &cfg)
+    ));
+    crate::segmentation::bake_frame_matte(&frame, &cfg, &cache_dir)
+        .map_err(|e| CommandError::Analysis(e.to_string()))?;
+
+    let feather = cfg.feather;
+    cfg.matte_cache_dir = Some(cache_dir.clone());
+
+    let clip = media_clip_mut(project, track_id, clip_id)?;
+    clip.background_removal = Some(cfg);
+    clip.mask = Some(ClipMask {
+        enabled: true,
+        invert: false,
+        feather,
+        kind: ClipMaskKind::Generated { cache_dir },
+    });
+    Ok(CommandOutcome::Applied)
+}
+
+fn set_clip_audio_denoise(
+    project: &mut Project,
+    track_id: Id,
+    clip_id: Id,
+    config: Option<AudioDenoise>,
+) -> Result<CommandOutcome, CommandError> {
+    let track = project
+        .find_track(track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    if track.kind != TrackKind::Audio {
+        return Err(CommandError::TrackKindMismatch(
+            track_id,
+            track.kind,
+            TrackKind::Audio,
+        ));
+    }
+    let config = match config {
+        None => None,
+        Some(mut cfg) => {
+            if cfg.backend != "afftdn" {
+                return Err(CommandError::InvalidDenoise(format!(
+                    "backend must be \"afftdn\", got \"{}\"",
+                    cfg.backend
+                )));
+            }
+            if !cfg.strength.is_finite() {
+                return Err(CommandError::InvalidDenoise(
+                    "strength must be finite".into(),
+                ));
+            }
+            cfg.strength = cfg.strength.clamp(0.0, 1.0);
+            Some(cfg)
+        }
+    };
+    let clip = media_clip_mut(project, track_id, clip_id)?;
+    clip.audio_denoise = config;
+    Ok(CommandOutcome::Applied)
+}
+
+fn apply_template(
+    project: &mut Project,
+    pack_id: &str,
+    template_id: &str,
+    position_secs: f64,
+) -> Result<CommandOutcome, CommandError> {
+    if !position_secs.is_finite() {
+        return Err(CommandError::Template(
+            "position_secs must be finite".into(),
+        ));
+    }
+    let packs = crate::packs::load_project_packs(project);
+    let pack = crate::packs::find_pack(&packs, pack_id).ok_or_else(|| {
+        CommandError::Template(format!("pack '{pack_id}' not found or not loaded"))
+    })?;
+    let template = pack
+        .manifest
+        .templates
+        .iter()
+        .find(|t| t.id == template_id)
+        .ok_or_else(|| {
+            CommandError::Template(format!("template '{pack_id}/{template_id}' not found"))
+        })?;
+    let commands: Vec<serde_json::Value> = template.commands.clone();
+    drop(packs);
+
+    let backup = project.clone();
+    for raw in commands {
+        let mut cmd: Command = match serde_json::from_value(raw) {
+            Ok(c) => c,
+            Err(e) => {
+                *project = backup;
+                return Err(CommandError::Template(format!(
+                    "invalid template command: {e}"
+                )));
+            }
+        };
+        if let Command::AddClip {
+            position_secs: ref mut pos,
+            ..
+        } = cmd
+        {
+            *pos += position_secs;
+        }
+        if let Err(e) = apply_command(project, cmd) {
+            *project = backup;
+            return Err(e);
+        }
+    }
+    Ok(CommandOutcome::Applied)
+}
+
+fn write_generated_sticker_png(path: &std::path::Path, prompt: &str) -> Result<(), CommandError> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(MediaError::Io)?;
+        }
+    }
+    let mut hash: u32 = 2166136261;
+    for b in prompt.as_bytes() {
+        hash ^= u32::from(*b);
+        hash = hash.wrapping_mul(16777619);
+    }
+    let r = ((hash >> 16) & 0xff) as u8;
+    let g = ((hash >> 8) & 0xff) as u8;
+    let b = (hash & 0xff) as u8;
+    let w = 256u32;
+    let h = 256u32;
+    let mut pixels = vec![0u8; (w * h * 4) as usize];
+    for px in pixels.chunks_exact_mut(4) {
+        px[0] = r.max(40);
+        px[1] = g.max(40);
+        px[2] = b.max(40);
+        px[3] = 255;
+    }
+    // Draw a lighter border so the sticker reads as a rectangle, not a flat field.
+    for x in 0..w {
+        for y in [0u32, 1, h - 2, h - 1] {
+            let i = ((y * w + x) * 4) as usize;
+            pixels[i] = 255;
+            pixels[i + 1] = 255;
+            pixels[i + 2] = 255;
+        }
+    }
+    for y in 0..h {
+        for x in [0u32, 1, w - 2, w - 1] {
+            let i = ((y * w + x) * 4) as usize;
+            pixels[i] = 255;
+            pixels[i + 1] = 255;
+            pixels[i + 2] = 255;
+        }
+    }
+    image::save_buffer(path, &pixels, w, h, image::ColorType::Rgba8)
+        .map_err(|e| CommandError::Analysis(e.to_string()))?;
+    Ok(())
+}
+
+fn generate_sticker(
+    project: &mut Project,
+    prompt: &str,
+    track_id: Id,
+    position_secs: f64,
+    output_path: &str,
+) -> Result<CommandOutcome, CommandError> {
+    let track = project
+        .find_track(track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    if track.kind != TrackKind::Video {
+        return Err(CommandError::TrackKindMismatch(
+            track_id,
+            track.kind,
+            TrackKind::Video,
+        ));
+    }
+    let path = std::path::PathBuf::from(output_path);
+    write_generated_sticker_png(&path, prompt)?;
+    let media_id = find_or_import_media(project, &path)?;
+    add_clip(project, track_id, media_id, position_secs, 0.0, 3.0)
+}
+
+fn find_media_clip_mut(project: &mut Project, clip_id: Id) -> Option<&mut MediaClip> {
+    for track in &mut project.tracks {
+        for clip in &mut track.clips {
+            if clip.id() == clip_id {
+                return clip.as_media_mut();
+            }
+        }
+    }
+    None
+}
+
+fn create_multicam_group(
+    project: &mut Project,
+    name: String,
+    clip_ids: Vec<Id>,
+) -> Result<CommandOutcome, CommandError> {
+    if clip_ids.is_empty() {
+        return Err(CommandError::Multicam("clip_ids must not be empty".into()));
+    }
+    for &id in &clip_ids {
+        if find_media_clip_mut(project, id).is_none() {
+            return Err(CommandError::Multicam(format!("clip not found: {id}")));
+        }
+    }
+    let group_id = Id::new_v4();
+    for &id in &clip_ids {
+        if let Some(clip) = find_media_clip_mut(project, id) {
+            clip.multicam_group_id = Some(group_id);
+        }
+    }
+    project.multicam_groups.push(MulticamGroup {
+        id: group_id,
+        name,
+        angle_clip_ids: clip_ids,
+        active_angle: 0,
+        sync_offsets_secs: Vec::new(),
+    });
+    Ok(CommandOutcome::Applied)
+}
+
+fn set_multicam_angle(
+    project: &mut Project,
+    group_id: Id,
+    active_angle: usize,
+) -> Result<CommandOutcome, CommandError> {
+    let group = project
+        .multicam_groups
+        .iter_mut()
+        .find(|g| g.id == group_id)
+        .ok_or_else(|| CommandError::Multicam(format!("group not found: {group_id}")))?;
+    if active_angle >= group.angle_clip_ids.len() {
+        return Err(CommandError::Multicam(format!(
+            "active_angle {active_angle} out of range ({} angles)",
+            group.angle_clip_ids.len()
+        )));
+    }
+    group.active_angle = active_angle;
+    Ok(CommandOutcome::Applied)
+}
+
+fn bright_centroid(frame: &crate::media::RgbaFrame) -> (f64, f64) {
+    let mut sum_x = 0.0f64;
+    let mut sum_y = 0.0f64;
+    let mut sum_w = 0.0f64;
+    let w = frame.width as f64;
+    let h = frame.height as f64;
+    for y in 0..frame.height {
+        for x in 0..frame.width {
+            let i = ((y * frame.width + x) * 4) as usize;
+            let r = frame.pixels[i] as f64;
+            let g = frame.pixels[i + 1] as f64;
+            let b = frame.pixels[i + 2] as f64;
+            let lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0;
+            if lum < 0.55 {
+                continue;
+            }
+            let weight = lum * lum;
+            sum_x += (x as f64 + 0.5) * weight;
+            sum_y += (y as f64 + 0.5) * weight;
+            sum_w += weight;
+        }
+    }
+    if sum_w <= 1e-9 {
+        return (0.5, 0.5);
+    }
+    ((sum_x / sum_w) / w.max(1.0), (sum_y / sum_w) / h.max(1.0))
+}
+
+fn sample_motion_centroids(
+    project: &Project,
+    clip: &MediaClip,
+    sample_count: u32,
+) -> Result<Vec<(f64, f64, f64)>, CommandError> {
+    let n = sample_count.max(2) as usize;
+    let dur = clip.timeline_duration_secs().max(1e-6);
+    let mut samples = Vec::with_capacity(n);
+    for i in 0..n {
+        let t_local = if n == 1 {
+            0.0
+        } else {
+            dur * (i as f64) / ((n - 1) as f64)
+        };
+        let source_t = clip.source_time_at(clip.position_secs + t_local);
+        let frame = decode_clip_frame(project, clip, source_t)?;
+        let (cx, cy) = bright_centroid(&frame);
+        samples.push((t_local, cx, cy));
+    }
+    Ok(samples)
+}
+
+fn replace_pos_keyframes(clip: &mut MediaClip, samples: &[(f64, f64, f64)]) {
+    clip.keyframes
+        .retain(|t| t.property != AnimProperty::PosX && t.property != AnimProperty::PosY);
+    let mut x_keys = Vec::with_capacity(samples.len());
+    let mut y_keys = Vec::with_capacity(samples.len());
+    for &(t, cx, cy) in samples {
+        x_keys.push(Keyframe {
+            time_secs: t,
+            value: (cx - 0.5) * 100.0,
+            easing: Easing::Linear,
+        });
+        y_keys.push(Keyframe {
+            time_secs: t,
+            value: (cy - 0.5) * 100.0,
+            easing: Easing::Linear,
+        });
+    }
+    clip.keyframes.push(KeyframeTrack {
+        property: AnimProperty::PosX,
+        keys: x_keys,
+    });
+    clip.keyframes.push(KeyframeTrack {
+        property: AnimProperty::PosY,
+        keys: y_keys,
+    });
+}
+
+fn track_motion(
+    project: &mut Project,
+    track_id: Id,
+    clip_id: Id,
+    sample_count: u32,
+) -> Result<CommandOutcome, CommandError> {
+    let track = project
+        .find_track(track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    if track.kind != TrackKind::Video {
+        return Err(CommandError::TrackKindMismatch(
+            track_id,
+            track.kind,
+            TrackKind::Video,
+        ));
+    }
+    let clip = track
+        .clips
+        .iter()
+        .find(|c| c.id() == clip_id)
+        .ok_or(CommandError::ClipNotFound(clip_id, track_id))?
+        .as_media()
+        .ok_or(CommandError::NotMediaClip(clip_id))?
+        .clone();
+    let samples = sample_motion_centroids(project, &clip, sample_count)?;
+    let clip = media_clip_mut(project, track_id, clip_id)?;
+    replace_pos_keyframes(clip, &samples);
+    Ok(CommandOutcome::Applied)
+}
+
+fn stabilize_clip(
+    project: &mut Project,
+    track_id: Id,
+    clip_id: Id,
+) -> Result<CommandOutcome, CommandError> {
+    let track = project
+        .find_track(track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    if track.kind != TrackKind::Video {
+        return Err(CommandError::TrackKindMismatch(
+            track_id,
+            track.kind,
+            TrackKind::Video,
+        ));
+    }
+    let clip = track
+        .clips
+        .iter()
+        .find(|c| c.id() == clip_id)
+        .ok_or(CommandError::ClipNotFound(clip_id, track_id))?
+        .as_media()
+        .ok_or(CommandError::NotMediaClip(clip_id))?
+        .clone();
+    let raw = sample_motion_centroids(project, &clip, 8)?;
+    let (t0, cx0, cy0) = raw[0];
+    let mut samples = Vec::with_capacity(raw.len());
+    // Identity at first sample; counteract drift relative to the first-frame centroid.
+    samples.push((t0, 0.5, 0.5));
+    for &(t, cx, cy) in raw.iter().skip(1) {
+        // Negative offset of motion relative to first frame, expressed in centroid space
+        // so replace_pos_keyframes maps (c-0.5)*100 → -(cx-cx0)*100.
+        samples.push((t, 0.5 - (cx - cx0), 0.5 - (cy - cy0)));
+    }
+    // Also rewrite first key explicitly as identity (0 offset).
+    samples[0] = (t0, 0.5, 0.5);
+    let clip = media_clip_mut(project, track_id, clip_id)?;
+    replace_pos_keyframes(clip, &samples);
+    Ok(CommandOutcome::Applied)
+}
+
+fn auto_reframe_clip(
+    project: &mut Project,
+    track_id: Id,
+    clip_id: Id,
+    target_aspect: f64,
+) -> Result<CommandOutcome, CommandError> {
+    if !target_aspect.is_finite() || target_aspect <= 0.0 {
+        return Err(CommandError::Analysis(
+            "target_aspect must be a finite number > 0".into(),
+        ));
+    }
+    let track = project
+        .find_track(track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    if track.kind != TrackKind::Video {
+        return Err(CommandError::TrackKindMismatch(
+            track_id,
+            track.kind,
+            TrackKind::Video,
+        ));
+    }
+    let clip = track
+        .clips
+        .iter()
+        .find(|c| c.id() == clip_id)
+        .ok_or(CommandError::ClipNotFound(clip_id, track_id))?
+        .as_media()
+        .ok_or(CommandError::NotMediaClip(clip_id))?;
+    let media = project
+        .find_media(clip.media_id)
+        .ok_or(CommandError::MediaNotFound(clip.media_id))?;
+    let src_w = media.width.unwrap_or(project.settings.width).max(1) as f64;
+    let src_h = media.height.unwrap_or(project.settings.height).max(1) as f64;
+    let src_aspect = src_w / src_h;
+    let scale = (src_aspect / target_aspect)
+        .max(target_aspect / src_aspect)
+        .max(1.0);
+    let clip = media_clip_mut(project, track_id, clip_id)?;
+    clip.transform.scale_x = scale;
+    clip.transform.scale_y = scale;
+    clip.transform.x = 0.0;
+    clip.transform.y = 0.0;
+    Ok(CommandOutcome::Applied)
 }
 
 fn generate_voiceover(
@@ -3477,5 +4186,256 @@ mod tests {
             .unwrap();
         assert!((clip.position_secs - 1.0).abs() < 1e-9);
         assert!((clip.source_out_secs - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn set_clip_mask_sets_and_clears() {
+        let (mut project, track_id, clip_id, dir) = setup_audio_clip();
+        let mask = ClipMask {
+            enabled: true,
+            invert: false,
+            feather: 0.2,
+            kind: ClipMaskKind::Rect {
+                x: 0.1,
+                y: 0.1,
+                width: 0.5,
+                height: 0.5,
+            },
+        };
+        apply_command(
+            &mut project,
+            Command::SetClipMask {
+                track_id,
+                clip_id,
+                mask: Some(mask.clone()),
+            },
+        )
+        .unwrap();
+        let clip = project
+            .find_track(track_id)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id() == clip_id)
+            .unwrap()
+            .as_media()
+            .unwrap();
+        assert_eq!(clip.mask.as_ref(), Some(&mask));
+
+        apply_command(
+            &mut project,
+            Command::SetClipMask {
+                track_id,
+                clip_id,
+                mask: None,
+            },
+        )
+        .unwrap();
+        let clip = project
+            .find_track(track_id)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id() == clip_id)
+            .unwrap()
+            .as_media()
+            .unwrap();
+        assert!(clip.mask.is_none());
+
+        let err = apply_command(
+            &mut project,
+            Command::SetClipMask {
+                track_id,
+                clip_id,
+                mask: Some(ClipMask {
+                    enabled: true,
+                    invert: false,
+                    feather: 2.0,
+                    kind: ClipMaskKind::None,
+                }),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::InvalidMask(_)));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn set_clip_audio_denoise_clamps_and_validates() {
+        let (mut project, track_id, clip_id, dir) = setup_audio_clip();
+        apply_command(
+            &mut project,
+            Command::SetClipAudioDenoise {
+                track_id,
+                clip_id,
+                config: Some(AudioDenoise {
+                    enabled: true,
+                    backend: "afftdn".into(),
+                    strength: 1.5,
+                }),
+            },
+        )
+        .unwrap();
+        let clip = project
+            .find_track(track_id)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id() == clip_id)
+            .unwrap()
+            .as_media()
+            .unwrap();
+        assert!((clip.audio_denoise.as_ref().unwrap().strength - 1.0).abs() < 1e-9);
+
+        let err = apply_command(
+            &mut project,
+            Command::SetClipAudioDenoise {
+                track_id,
+                clip_id,
+                config: Some(AudioDenoise {
+                    enabled: true,
+                    backend: "rnnoise".into(),
+                    strength: 0.5,
+                }),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::InvalidDenoise(_)));
+
+        // Reject on video tracks.
+        let v_track = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Video,
+                name: "V1".into(),
+                id: None,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        let err = apply_command(
+            &mut project,
+            Command::SetClipAudioDenoise {
+                track_id: v_track,
+                clip_id,
+                config: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::TrackKindMismatch(_, _, _)));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn create_multicam_group_and_set_angle() {
+        let dir = std::env::temp_dir().join(format!("uppercut-test-{}", Id::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav_path = write_temp_wav(&dir, "clip.wav", 10.0);
+        let mut project = test_project();
+        let media_id = match apply_command(
+            &mut project,
+            Command::ImportMedia {
+                path: wav_path.to_string_lossy().to_string(),
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::MediaImported { media_id } => media_id,
+            _ => unreachable!(),
+        };
+        let track_id = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Audio,
+                name: "A1".into(),
+                id: None,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        let clip_a = match apply_command(
+            &mut project,
+            Command::AddClip {
+                track_id,
+                media_id,
+                position_secs: 0.0,
+                source_in_secs: 0.0,
+                source_out_secs: 2.0,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::ClipAdded { clip_id } => clip_id,
+            _ => unreachable!(),
+        };
+        let clip_b = match apply_command(
+            &mut project,
+            Command::AddClip {
+                track_id,
+                media_id,
+                position_secs: 3.0,
+                source_in_secs: 0.0,
+                source_out_secs: 2.0,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::ClipAdded { clip_id } => clip_id,
+            _ => unreachable!(),
+        };
+
+        apply_command(
+            &mut project,
+            Command::CreateMulticamGroup {
+                name: "A/B".into(),
+                clip_ids: vec![clip_a, clip_b],
+            },
+        )
+        .unwrap();
+        assert_eq!(project.multicam_groups.len(), 1);
+        let group_id = project.multicam_groups[0].id;
+        assert_eq!(project.multicam_groups[0].active_angle, 0);
+        for id in [clip_a, clip_b] {
+            let clip = project
+                .find_track(track_id)
+                .unwrap()
+                .clips
+                .iter()
+                .find(|c| c.id() == id)
+                .unwrap()
+                .as_media()
+                .unwrap();
+            assert_eq!(clip.multicam_group_id, Some(group_id));
+        }
+
+        apply_command(
+            &mut project,
+            Command::SetMulticamAngle {
+                group_id,
+                active_angle: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(project.multicam_groups[0].active_angle, 1);
+
+        let err = apply_command(
+            &mut project,
+            Command::SetMulticamAngle {
+                group_id,
+                active_angle: 99,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::Multicam(_)));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

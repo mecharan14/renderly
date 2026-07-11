@@ -4,9 +4,11 @@
 //! Phase 3.4 runs builtin effect chains on each layer before the cover+transform draw.
 //! Phase 3 adds dual-texture WGSL transitions.
 
+mod chroma;
 pub mod effects;
 mod transition;
 
+pub use chroma::apply_chroma_effects;
 pub use effects::{builtin_effect_ids, default_params, BUILTIN_EFFECT_IDS};
 
 use crate::media::RgbaFrame;
@@ -783,11 +785,12 @@ mod tests {
     #[test]
     fn builtin_effect_ids_lists_locked_set() {
         let ids = builtin_effect_ids();
-        assert_eq!(ids.len(), 5);
+        assert_eq!(ids.len(), 6);
         assert!(ids.contains(&"builtin:color_adjust"));
         assert!(ids.contains(&"builtin:blur"));
         assert!(ids.contains(&"builtin:lut_contrast"));
         assert!(ids.contains(&"builtin:lut_warm"));
         assert!(ids.contains(&"builtin:glitch"));
+        assert!(ids.contains(&"builtin:chroma_key"));
     }
 }

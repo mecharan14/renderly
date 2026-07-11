@@ -24,6 +24,11 @@ export const BUILTIN_VIDEO_EFFECTS: {
     label: "Glitch",
     defaults: { intensity: 0.5, slice: 0.5 },
   },
+  {
+    id: "builtin:chroma_key",
+    label: "Chroma key",
+    defaults: { key_r: 0, key_g: 1, key_b: 0, tolerance: 0.3, softness: 0.1 },
+  },
 ];
 
 /** @deprecated use BUILTIN_VIDEO_EFFECTS */

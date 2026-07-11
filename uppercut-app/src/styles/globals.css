@@ -759,6 +759,41 @@ body {
   cursor: default;
 }
 
+.preview-mask-overlay {
+  position: absolute;
+  z-index: 6;
+  pointer-events: auto;
+  cursor: crosshair;
+}
+
+.preview-mask-outline {
+  fill: rgba(90, 180, 255, 0.08);
+  stroke: #5ab4ff;
+  stroke-width: 1.5;
+  stroke-dasharray: 5 3;
+}
+
+.preview-mask-knob {
+  fill: #1a1a1c;
+  stroke: #5ab4ff;
+  stroke-width: 1.5;
+  cursor: nwse-resize;
+}
+
+.preview-mask-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: rgba(10, 10, 12, 0.72);
+  color: var(--text-2, #c8c8cc);
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 .preview-handles-svg {
   display: block;
   overflow: visible;
@@ -1198,6 +1233,14 @@ body {
 
 .insp-disclosure .inspector-section h3 {
   display: none;
+}
+
+.insp-btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
 }
 
 .field {

@@ -6,6 +6,7 @@ import {
   ZoomOut,
   Maximize,
   SplitSquareHorizontal,
+  CircleDashed,
 } from "lucide-react";
 import { useEditorStore } from "../../store/editorStore";
 import { splitSelectedAtPlayhead } from "../../timeline/interactions";
@@ -46,6 +47,18 @@ export function TimelineToolbar() {
             }}
           >
             <Scissors size={15} strokeWidth={1.75} />
+          </button>
+        </Tooltip>
+        <Tooltip content="Mask · draw/edit rect or ellipse on preview (M)">
+          <button
+            type="button"
+            className={`tool-btn icon-only${toolMode === "mask" ? " active" : ""}`}
+            onClick={() => {
+              setTool("mask");
+              toast("Drag on the paused preview to draw a mask", "info");
+            }}
+          >
+            <CircleDashed size={15} strokeWidth={1.75} />
           </button>
         </Tooltip>
       </div>

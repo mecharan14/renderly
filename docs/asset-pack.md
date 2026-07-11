@@ -35,6 +35,15 @@ my-pack/
   ],
   "sfx": [
     { "id": "blip", "label": "Blip", "path": "sfx/blip.wav" }
+  ],
+  "templates": [
+    {
+      "id": "cold-open",
+      "label": "Cold open",
+      "commands": [
+        // Serialized Command values; AddClip.position_secs is offset by ApplyTemplate
+      ]
+    }
   ]
 }
 ```
@@ -64,11 +73,19 @@ the asset into the media pool if needed, then `AddClip`.
 Audio file placed as an audio `MediaClip`. Command: `AddSfxFromPack { pack_id, sfx_id,
 track_id, position_secs }`.
 
+### Templates (Phase 4)
+
+Named command sequences. Each entry has `id`, `label`, and `commands` (JSON `Command`
+objects). `ApplyTemplate { pack_id, template_id, position_secs }` deserializes each
+command, adds `position_secs` to every `AddClip.position_secs`, and applies them
+sequentially — rolling back the project clone on any failure.
+
 ## Commands
 
 - `LoadAssetPack { path }` — validate + record path on the project
 - `UnloadAssetPack { pack_id }`
 - `AddStickerFromPack` / `AddSfxFromPack`
+- `ApplyTemplate`
 
 See example: [`examples/packs/starter`](../examples/packs/starter).
 Registry seed: [`examples/registry/index.json`](../examples/registry/index.json).

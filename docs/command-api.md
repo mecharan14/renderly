@@ -1,6 +1,6 @@
 # Command API
 
-Status: **current** (matches project schema v5). This is the source of truth for the `Command` enum and
+Status: **current** (matches project schema v6). This is the source of truth for the `Command` enum and
 `apply_command` in `uppercut-core`. GUI, CLI, and MCP must all dispatch through this exact
 set (see AGENTS.md §0.1) — none of them may mutate `Project` state any other way.
 
@@ -38,6 +38,17 @@ pub enum Command {
     UnloadWasmPlugin { plugin_id: String },
     AddStickerFromPack { pack_id: String, sticker_id: String, track_id: Id, position_secs: f64 },
     AddSfxFromPack { pack_id: String, sfx_id: String, track_id: Id, position_secs: f64 },
+    SetClipMask { track_id: Id, clip_id: Id, mask: Option<ClipMask> },
+    SetClipBackgroundRemoval { track_id: Id, clip_id: Id, config: Option<BackgroundRemoval> },
+    GenerateBackgroundMatte { track_id: Id, clip_id: Id },
+    SetClipAudioDenoise { track_id: Id, clip_id: Id, config: Option<AudioDenoise> },
+    ApplyTemplate { pack_id: String, template_id: String, position_secs: f64 },
+    GenerateSticker { prompt: String, track_id: Id, position_secs: f64, output_path: String },
+    CreateMulticamGroup { name: String, clip_ids: Vec<Id> },
+    SetMulticamAngle { group_id: Id, active_angle: usize },
+    TrackMotion { track_id: Id, clip_id: Id, sample_count: u32 },
+    StabilizeClip { track_id: Id, clip_id: Id },
+    AutoReframeClip { track_id: Id, clip_id: Id, target_aspect: f64 },
     Export { output_path: String, preset: ExportPreset },
 }
 
@@ -280,10 +291,11 @@ removes both the track and the clip together instead of leaving an empty track b
 of `uppercut-core`'s public API — CLI and MCP keep calling `apply_command` once per
 command, which is sufficient for scripted/agent use.
 
-## Non-goals (Phase 4+)
+## Non-goals (later)
 
-Background removal, chroma, masks, tracking, stabilization, denoise, multi-cam, in-app
-remote marketplace with payments, custom pack WGSL shaders — see [project-schema.md](project-schema.md).
+In-app remote marketplace with payments, custom pack WGSL shaders — see
+[project-schema.md](project-schema.md). Chroma-key polish and full temporal matte baking
+remain follow-ups on top of the Phase 4 command surface above.
 
 ## Version history
 
@@ -304,6 +316,10 @@ remote marketplace with payments, custom pack WGSL shaders — see [project-sche
   `LoadAssetPack` / `UnloadAssetPack`; `LoadWasmPlugin` / `UnloadWasmPlugin`.
 - **Phase 3 deferred** (project schema v5): Speed keyframes; `AddStickerFromPack` /
   `AddSfxFromPack`; audio WASM `process_audio`.
+- **Phase 4** (project schema v6): `SetClipMask`, `SetClipBackgroundRemoval`,
+  `GenerateBackgroundMatte`, `SetClipAudioDenoise`, `ApplyTemplate`, `GenerateSticker`,
+  `CreateMulticamGroup`, `SetMulticamAngle`, `TrackMotion`, `StabilizeClip`,
+  `AutoReframeClip`; pack `templates`; export multicam angle filter; afftdn denoise mix.
 
 - **Phase 3.4** (non-breaking): `SetClipEffects` validates known builtin ids + param
   clamps; compositor executes `builtin:color_adjust` / `blur` / `lut_contrast` / `lut_warm`.

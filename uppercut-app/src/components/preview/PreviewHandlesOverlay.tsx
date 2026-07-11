@@ -99,6 +99,7 @@ export function PreviewHandlesOverlay({
   const selection = useEditorStore((s) => s.selection);
   const playing = useEditorStore((s) => s.playing);
   const project = useEditorStore((s) => s.project);
+  const toolMode = useEditorStore((s) => s.toolMode);
   const dispatch = useEditorStore((s) => s.dispatch);
   const setDragging = useEditorStore((s) => s.setDragging);
 
@@ -107,10 +108,10 @@ export function PreviewHandlesOverlay({
   const overlayRef = useRef<HTMLDivElement | null>(null);
 
   const active = useMemo(() => {
-    if (playing || !project) return null;
+    if (playing || !project || toolMode === "mask") return null;
     return activeVideoSelection(playhead);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- selection/project drive refresh
-  }, [playhead, playing, project, selection]);
+  }, [playhead, playing, project, selection, toolMode]);
 
   const transform = resolveTransform(active?.clip.transform);
 

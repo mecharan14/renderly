@@ -740,6 +740,7 @@ pub fn mix_timeline_audio(
                 role: None,
                 speed: 1.0,
                 effects: Vec::new(),
+                denoise: None,
             });
             final_clips.push(AudioMixClip {
                 path: ducked_wav.clone(),
@@ -752,6 +753,7 @@ pub fn mix_timeline_audio(
                 role: None,
                 speed: 1.0,
                 effects: Vec::new(),
+                denoise: None,
             });
             for c in other {
                 final_clips.push(c.clone());
@@ -865,7 +867,14 @@ fn mix_clip_bus(
 
 fn build_audio_filter(clip: &AudioMixClip, seg_duration: f64) -> String {
     let volume = db_to_linear(clip.gain_db);
-    let mut parts = vec![format!("volume={volume:.6}")];
+    let mut parts = Vec::new();
+    if let Some(denoise) = clip.denoise.as_ref() {
+        if denoise.enabled && denoise.backend == "afftdn" {
+            let nr = (denoise.strength.clamp(0.0, 1.0) * 20.0).max(0.01);
+            parts.push(format!("afftdn=nr={nr:.3}"));
+        }
+    }
+    parts.push(format!("volume={volume:.6}"));
     let speed = if clip.speed.is_finite() && clip.speed > 0.0 {
         clip.speed.clamp(0.25, 4.0)
     } else {
@@ -933,6 +942,8 @@ pub struct AudioMixClip {
     pub speed: f64,
     /// Optional WASM audio effects applied after decode, before fades/volume in the bus.
     pub effects: Vec<crate::project::EffectInstance>,
+    /// Optional Phase 4 audio denoise (`afftdn`) applied before volume/fades.
+    pub denoise: Option<crate::project::AudioDenoise>,
 }
 
 #[cfg(test)]

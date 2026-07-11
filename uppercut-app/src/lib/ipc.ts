@@ -243,6 +243,21 @@ export function previewTransformOverride(
   });
 }
 
+/** Ephemeral mask for live mask-handle drag (no undo / no session write). */
+export function previewMaskOverride(
+  trackId: string,
+  clipId: string,
+  mask: import("./types").ClipMask | null,
+  timeSecs: number,
+): Promise<void> {
+  return invoke("preview_mask_override", {
+    trackId,
+    clipId,
+    mask,
+    timeSecs,
+  });
+}
+
 // ---- Events ----
 
 export function onPlaybackTick(cb: (payload: PlaybackTickPayload) => void): () => void {

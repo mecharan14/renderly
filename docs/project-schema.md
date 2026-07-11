@@ -1,4 +1,4 @@
-# Project schema — v5
+# Project schema — v6
 
 Status: **current**. This is the source of truth for `uppercut-core`'s project
 model. Implementation types in `uppercut-core/src/project/` must match this document; if
@@ -12,72 +12,47 @@ extension `.uppercut.json`.
 
 ```jsonc
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "id": "b3f1c2a0-...-uuid",
   "name": "ultra-bruno-ep12",
-  "settings": {
-    "fps": 60.0,
-    "width": 1080,
-    "height": 1920,
-    "sample_rate": 48000,
-    "duck_db": -12.0
-  },
+  "settings": { "fps": 60.0, "width": 1080, "height": 1920, "sample_rate": 48000, "duck_db": -12.0 },
   "media": [ /* MediaItem[] */ ],
   "tracks": [ /* Track[] */ ],
-  "asset_pack_paths": [],   // optional; directories containing pack.json
-  "wasm_plugin_paths": []   // optional; directories containing plugin.json
+  "asset_pack_paths": [],
+  "wasm_plugin_paths": [],
+  "multicam_groups": [],
+  "segmentation_model_path": null
 }
 ```
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | u32 | `5` for this spec. Loaders accept `1`..=`5`; saves write `5`. |
-| `id` | string (UUIDv4) | Stable project identity, generated on creation. |
-| `name` | string | Human-facing project name; not used for file paths. |
-| `settings.*` | — | Same as v3 (`fps`, `width`, `height`, `sample_rate`, `duck_db`). |
-| `media` | MediaItem[] | Pool of imported source files. |
-| `tracks` | Track[] | Ordered list (video / audio / caption). |
-| `asset_pack_paths` | path[] | Loaded asset-pack roots (see [asset-pack.md](asset-pack.md)). |
-| `wasm_plugin_paths` | path[] | Loaded WASM plugin roots (see [plugin-api.md](plugin-api.md)). |
+| `schema_version` | u32 | `6` for this spec. Loaders accept `1`..=`6`; saves write `6`. |
+| `multicam_groups` | MulticamGroup[] | Optional sync groups (Phase 4). |
+| `segmentation_model_path` | path? | Optional local model marker for BG removal. |
 
-## MediaClip (selected fields)
+## MediaClip (Phase 4 fields)
 
 | Field | Notes |
 |---|---|
-| `source_in_secs` / `source_out_secs` | Source media range. |
-| `speed` | Base playback rate (default `1.0`, clamp `0.25`..`4.0`) when no Speed keyframes. |
-| `keyframes` | May include `AnimProperty::Speed` keys (same clamp). Timeline duration and source time are the **integral of speed** over the clip (piecewise-linear with easing between keys). |
-| `transform` / `effects` | Phase 3. |
-| `outgoing_transition` | Optional `ClipTransition` (video tracks). |
+| `mask` | Optional `ClipMask` — shape / raster / generated matte; invert + feather.
+  Shape UVs are source-frame (0..1). Rect/ellipse authoring is via the app Mask tool
+  overlay + `SetClipMask` (live drag uses ephemeral `preview_mask_override`). |
+| `background_removal` | Optional config (`model_id` `heuristic` or CLI-backed `rvm`/`birefnet`, threshold, feather, `matte_cache_dir`). |
+| `audio_denoise` | Optional `{ enabled, backend: "afftdn", strength }` — **audio tracks only** in v1. |
+| `multicam_group_id` | Optional link into `project.multicam_groups`. |
 
-Audio with Speed keys is segmented (~50 ms / key intervals) and chained via FFmpeg `atempo`.
-
-### Builtin effects
+### Builtin effects (additions)
 
 | `effect_id` | Params |
 |---|---|
-| `builtin:color_adjust` | `exposure`, `contrast`, `saturation` |
-| `builtin:blur` | `radius` |
-| `builtin:lut_contrast` / `builtin:lut_warm` | `intensity` |
-| `builtin:glitch` | `intensity`, `slice` |
+| `builtin:chroma_key` | `key_r`, `key_g`, `key_b`, `tolerance`, `softness` |
 
-Pack LUTs: `pack:<pack_id>:lut:<lut_id>`. WASM: `wasm:<plugin_id>` when loaded (frame and/or audio ABI).
+### Effect / matte order
 
-### ClipTransition
-
-`kind` is one of: `crossfade`, `fade_black`, `wipe_left`, `wipe_right`, `wipe_up`,
-`wipe_down`, `slide_left`, `slide_right`, `iris`, `blur_dissolve`, plus `duration_secs`.
-Renderer dual-decodes during `[cut − d, cut)` and blends via WGSL (`transition.wgsl`).
-
-## What's intentionally not in v5 yet
-
-Background removal, chroma, masks, tracking, stabilization, denoise, multi-cam, in-app
-remote marketplace with payments, custom pack WGSL shaders (Phase 4).
+source decode → pack LUT → WASM frame → **chroma key (CPU alpha)** → **background-removal matte** → **clip mask** → GPU builtins (color/blur/lut/glitch) → composite blend.
 
 ## Version history
 
-- **v0–v3**: see prior history (keyframes/effects in v2; `outgoing_transition` in v3).
-- **v4** (Phase 3 close-out): `MediaClip.speed`; ten transition kinds; glitch; project
-  `asset_pack_paths` / `wasm_plugin_paths`.
-- **v5** (Phase 3 deferred): keyframed `AnimProperty::Speed` ramps (integral source time);
-  stickers/SFX pack entries + commands; audio WASM `process_audio`.
+- **v5**: Speed keyframes; stickers/SFX; audio WASM.
+- **v6** (Phase 4): `ClipMask`, background removal, audio denoise, multicam groups; chroma key builtin.

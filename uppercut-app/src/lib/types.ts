@@ -1,4 +1,4 @@
-// TS mirror of uppercut-core's project schema v5 (docs/project-schema.md). Keep in sync.
+// TS mirror of uppercut-core's project schema v6 (docs/project-schema.md). Keep in sync.
 
 export interface Project {
   schema_version: number;
@@ -9,6 +9,8 @@ export interface Project {
   tracks: Track[];
   asset_pack_paths?: string[];
   wasm_plugin_paths?: string[];
+  multicam_groups?: MulticamGroup[];
+  segmentation_model_path?: string | null;
 }
 
 export interface ClipTransform {
@@ -110,6 +112,47 @@ export interface MediaClip {
   keyframes?: KeyframeTrack[];
   effects?: EffectInstance[];
   outgoing_transition?: ClipTransition | null;
+  mask?: ClipMask | null;
+  background_removal?: BackgroundRemoval | null;
+  audio_denoise?: AudioDenoise | null;
+  multicam_group_id?: string | null;
+}
+
+export type ClipMaskKind =
+  | { type: "none" }
+  | { type: "rect"; x: number; y: number; width: number; height: number }
+  | { type: "ellipse"; cx: number; cy: number; rx: number; ry: number }
+  | { type: "raster"; path: string }
+  | { type: "generated"; cache_dir: string };
+
+export interface ClipMask {
+  enabled?: boolean;
+  invert?: boolean;
+  feather?: number;
+  kind: ClipMaskKind;
+}
+
+export interface BackgroundRemoval {
+  enabled?: boolean;
+  model_id?: string;
+  threshold?: number;
+  feather?: number;
+  temporal?: boolean;
+  matte_cache_dir?: string | null;
+}
+
+export interface AudioDenoise {
+  enabled?: boolean;
+  backend?: string;
+  strength?: number;
+}
+
+export interface MulticamGroup {
+  id: string;
+  name: string;
+  angle_clip_ids: string[];
+  active_angle?: number;
+  sync_offsets_secs?: number[];
 }
 
 export type TransitionKind =

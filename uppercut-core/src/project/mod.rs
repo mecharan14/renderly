@@ -1,4 +1,4 @@
-//! Project schema v4 — matches docs/project-schema.md exactly.
+//! Project schema v6 — matches docs/project-schema.md exactly.
 //! If you change a type here, update that doc in the same change.
 
 use serde::{Deserialize, Serialize};
@@ -14,9 +14,9 @@ pub use anim::{
 
 pub type Id = uuid::Uuid;
 
-/// Current on-disk schema. Loaders accept `1`..=`5` (older files get serde defaults for
-/// new fields); new projects and saves write `5`.
-pub const SCHEMA_VERSION: u32 = 5;
+/// Current on-disk schema. Loaders accept `1`..=`6` (older files get serde defaults for
+/// new fields); new projects and saves write `6`.
+pub const SCHEMA_VERSION: u32 = 6;
 pub const MIN_LOADABLE_SCHEMA_VERSION: u32 = 1;
 
 /// Clamp / sanitize clip playback speed (Phase 3).
@@ -42,6 +42,12 @@ pub struct Project {
     /// Absolute or project-relative paths to loaded WASM plugin roots (Phase 3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wasm_plugin_paths: Vec<PathBuf>,
+    /// Multicam sync groups (Phase 4). Empty on older projects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub multicam_groups: Vec<MulticamGroup>,
+    /// Optional local segmentation model directory / marker (Phase 4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segmentation_model_path: Option<PathBuf>,
 }
 
 impl Project {
@@ -55,6 +61,8 @@ impl Project {
             tracks: Vec::new(),
             asset_pack_paths: Vec::new(),
             wasm_plugin_paths: Vec::new(),
+            multicam_groups: Vec::new(),
+            segmentation_model_path: None,
         }
     }
 
@@ -436,10 +444,163 @@ pub struct MediaClip {
     /// Transition into the next clip on the same track (Phase 3.5). Renderer-only overlap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outgoing_transition: Option<ClipTransition>,
+    /// Shared alpha mask / matte (Phase 4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<ClipMask>,
+    /// Local background-removal config (Phase 4); result feeds `mask`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_removal: Option<BackgroundRemoval>,
+    /// Local audio denoise (Phase 4). Audio-track clips only in v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_denoise: Option<AudioDenoise>,
+    /// Optional multicam group this clip belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multicam_group_id: Option<Id>,
 }
 
 fn default_speed() -> f64 {
     1.0
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClipMask {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub invert: bool,
+    /// Soft edge 0..=1.
+    #[serde(default)]
+    pub feather: f64,
+    pub kind: ClipMaskKind,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClipMaskKind {
+    None,
+    Rect {
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    },
+    Ellipse {
+        cx: f64,
+        cy: f64,
+        rx: f64,
+        ry: f64,
+    },
+    Raster {
+        path: PathBuf,
+    },
+    Generated {
+        cache_dir: PathBuf,
+    },
+}
+
+/// Convenience alias used by mask application helpers.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MaskShape {
+    Rect {
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    },
+    Ellipse {
+        cx: f64,
+        cy: f64,
+        rx: f64,
+        ry: f64,
+    },
+}
+
+impl ClipMaskKind {
+    pub fn as_shape(&self) -> Option<MaskShape> {
+        match self {
+            Self::Rect {
+                x,
+                y,
+                width,
+                height,
+            } => Some(MaskShape::Rect {
+                x: *x,
+                y: *y,
+                width: *width,
+                height: *height,
+            }),
+            Self::Ellipse { cx, cy, rx, ry } => Some(MaskShape::Ellipse {
+                cx: *cx,
+                cy: *cy,
+                rx: *rx,
+                ry: *ry,
+            }),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BackgroundRemoval {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// `heuristic` (builtin), or `cli` / `rvm` / `birefnet` when `UPPERCUT_SEG_CLI` is set.
+    #[serde(default = "default_bg_model")]
+    pub model_id: String,
+    #[serde(default = "default_bg_threshold")]
+    pub threshold: f64,
+    #[serde(default)]
+    pub feather: f64,
+    #[serde(default)]
+    pub temporal: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matte_cache_dir: Option<PathBuf>,
+}
+
+fn default_bg_model() -> String {
+    "heuristic".into()
+}
+
+fn default_bg_threshold() -> f64 {
+    0.15
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioDenoise {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// `afftdn` (FFmpeg builtin) or future model backends.
+    #[serde(default = "default_denoise_backend")]
+    pub backend: String,
+    /// 0..=1 mapped into afftdn noise reduction strength.
+    #[serde(default = "default_denoise_strength")]
+    pub strength: f64,
+}
+
+fn default_denoise_backend() -> String {
+    "afftdn".into()
+}
+
+fn default_denoise_strength() -> f64 {
+    0.5
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MulticamGroup {
+    pub id: Id,
+    pub name: String,
+    /// Clip ids (one per angle) participating in the group.
+    pub angle_clip_ids: Vec<Id>,
+    /// Index into `angle_clip_ids` that is currently active for export/preview.
+    #[serde(default)]
+    pub active_angle: usize,
+    /// Sync offset per angle in seconds (same length as angles, optional).
+    #[serde(default)]
+    pub sync_offsets_secs: Vec<f64>,
 }
 
 impl Default for MediaClip {
@@ -459,6 +620,10 @@ impl Default for MediaClip {
             keyframes: Vec::new(),
             effects: Vec::new(),
             outgoing_transition: None,
+            mask: None,
+            background_removal: None,
+            audio_denoise: None,
+            multicam_group_id: None,
         }
     }
 }

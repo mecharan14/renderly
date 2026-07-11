@@ -248,6 +248,98 @@ export function addSfxFromPack(
   };
 }
 
+export function setClipMask(
+  trackId: string,
+  clipId: string,
+  mask: import("./types").ClipMask | null,
+) {
+  return { command: "SetClipMask", track_id: trackId, clip_id: clipId, mask };
+}
+
+export function setClipBackgroundRemoval(
+  trackId: string,
+  clipId: string,
+  config: import("./types").BackgroundRemoval | null,
+) {
+  return {
+    command: "SetClipBackgroundRemoval",
+    track_id: trackId,
+    clip_id: clipId,
+    config,
+  };
+}
+
+export function generateBackgroundMatte(trackId: string, clipId: string) {
+  return { command: "GenerateBackgroundMatte", track_id: trackId, clip_id: clipId };
+}
+
+export function setClipAudioDenoise(
+  trackId: string,
+  clipId: string,
+  config: import("./types").AudioDenoise | null,
+) {
+  return {
+    command: "SetClipAudioDenoise",
+    track_id: trackId,
+    clip_id: clipId,
+    config,
+  };
+}
+
+export function applyTemplate(packId: string, templateId: string, positionSecs: number) {
+  return {
+    command: "ApplyTemplate",
+    pack_id: packId,
+    template_id: templateId,
+    position_secs: positionSecs,
+  };
+}
+
+export function generateSticker(
+  prompt: string,
+  trackId: string,
+  positionSecs: number,
+  outputPath: string,
+) {
+  return {
+    command: "GenerateSticker",
+    prompt,
+    track_id: trackId,
+    position_secs: positionSecs,
+    output_path: outputPath,
+  };
+}
+
+export function createMulticamGroup(name: string, clipIds: string[]) {
+  return { command: "CreateMulticamGroup", name, clip_ids: clipIds };
+}
+
+export function setMulticamAngle(groupId: string, activeAngle: number) {
+  return { command: "SetMulticamAngle", group_id: groupId, active_angle: activeAngle };
+}
+
+export function trackMotion(trackId: string, clipId: string, sampleCount = 12) {
+  return {
+    command: "TrackMotion",
+    track_id: trackId,
+    clip_id: clipId,
+    sample_count: sampleCount,
+  };
+}
+
+export function stabilizeClip(trackId: string, clipId: string) {
+  return { command: "StabilizeClip", track_id: trackId, clip_id: clipId };
+}
+
+export function autoReframeClip(trackId: string, clipId: string, targetAspect: number) {
+  return {
+    command: "AutoReframeClip",
+    track_id: trackId,
+    clip_id: clipId,
+    target_aspect: targetAspect,
+  };
+}
+
 export function generateCaptions(
   mediaId: string,
   trackId: string,

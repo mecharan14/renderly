@@ -107,6 +107,10 @@ export function App() {
         store.setTool("razor");
         return;
       }
+      if (e.key === "m" || e.key === "M") {
+        store.setTool("mask");
+        return;
+      }
       if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
         void deleteSelected(e.shiftKey);

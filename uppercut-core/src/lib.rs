@@ -7,11 +7,13 @@ pub mod captions;
 pub mod commands;
 pub mod compose;
 pub mod export;
+pub mod mask;
 pub mod media;
 pub mod packs;
 pub mod perceive;
 pub mod plugins;
 pub mod project;
+pub mod segmentation;
 
 pub use audio::{TtsError, VoiceoverProvider};
 pub use commands::{apply_command, Command, CommandError, CommandOutcome};

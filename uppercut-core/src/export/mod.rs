@@ -91,6 +91,8 @@ struct ActiveLayer {
     transform: ClipTransform,
     effects: Vec<crate::project::EffectInstance>,
     transition: Option<crate::compose::LayerTransition>,
+    mask: Option<crate::project::ClipMask>,
+    background_removal: Option<crate::project::BackgroundRemoval>,
 }
 
 struct ActiveCaption {
@@ -189,6 +191,13 @@ impl FrameRenderer {
                 crate::packs::apply_pack_effects(project, &mut frame, &layer.effects);
                 if let Some(host) = plugin_host.as_ref() {
                     let _ = host.apply_effects(&mut frame, &layer.effects);
+                }
+                crate::compose::apply_chroma_effects(&mut frame, &layer.effects);
+                if let Some(bg) = layer.background_removal.as_ref().filter(|b| b.enabled) {
+                    apply_background_removal_matte(&mut frame, bg);
+                }
+                if let Some(mask) = layer.mask.as_ref() {
+                    crate::mask::apply_clip_mask(&mut frame, mask);
                 }
                 compose_layers.push(ComposeLayer {
                     frame,
@@ -419,6 +428,7 @@ fn collect_audio_clips(project: &Project) -> Vec<AudioMixClip> {
                     role: track.audio_role,
                     speed,
                     effects: a.effects.clone(),
+                    denoise: a.audio_denoise.clone(),
                 });
             }
         }
@@ -667,6 +677,7 @@ pub fn mix_timeline_audio_range_to_file(
                 role: track.audio_role,
                 speed: a.speed_factor(),
                 effects: a.effects.clone(),
+                denoise: a.audio_denoise.clone(),
             });
         }
     }
@@ -722,7 +733,7 @@ fn active_layers(project: &Project, t: f64) -> Result<Vec<ActiveLayer>, ExportEr
             .clips
             .iter()
             .filter_map(|c| match c {
-                Clip::Video(v) if v.enabled => Some(v),
+                Clip::Video(v) if v.enabled && multicam_angle_active(project, v) => Some(v),
                 _ => None,
             })
             .collect();
@@ -784,6 +795,8 @@ fn active_layers(project: &Project, t: f64) -> Result<Vec<ActiveLayer>, ExportEr
                     progress: u,
                     is_incoming: false,
                 }),
+                mask: v.mask.clone(),
+                background_removal: v.background_removal.clone(),
             });
             layers.push(ActiveLayer {
                 // Distinct from track.id so FrameRenderer keeps a second decoder open.
@@ -797,6 +810,8 @@ fn active_layers(project: &Project, t: f64) -> Result<Vec<ActiveLayer>, ExportEr
                     progress: u,
                     is_incoming: true,
                 }),
+                mask: incoming.mask.clone(),
+                background_removal: incoming.background_removal.clone(),
             });
             handled = true;
             break;
@@ -807,7 +822,7 @@ fn active_layers(project: &Project, t: f64) -> Result<Vec<ActiveLayer>, ExportEr
 
         for clip in &track.clips {
             let Clip::Video(v) = clip else { continue };
-            if !v.enabled {
+            if !v.enabled || !multicam_angle_active(project, v) {
                 continue;
             }
             let start = v.position_secs;
@@ -826,6 +841,8 @@ fn active_layers(project: &Project, t: f64) -> Result<Vec<ActiveLayer>, ExportEr
                     transform: evaluate_transform(v, t),
                     effects: v.effects.clone(),
                     transition: None,
+                    mask: v.mask.clone(),
+                    background_removal: v.background_removal.clone(),
                 });
                 break;
             }
@@ -833,6 +850,42 @@ fn active_layers(project: &Project, t: f64) -> Result<Vec<ActiveLayer>, ExportEr
     }
 
     Ok(layers)
+}
+
+/// True when the clip is not in a multicam group, or is the group's active angle.
+fn multicam_angle_active(project: &Project, clip: &crate::project::MediaClip) -> bool {
+    let Some(group_id) = clip.multicam_group_id else {
+        return true;
+    };
+    let Some(group) = project.multicam_groups.iter().find(|g| g.id == group_id) else {
+        return true;
+    };
+    group
+        .angle_clip_ids
+        .get(group.active_angle)
+        .copied()
+        .map(|id| id == clip.id)
+        .unwrap_or(false)
+}
+
+fn apply_background_removal_matte(frame: &mut RgbaFrame, cfg: &crate::project::BackgroundRemoval) {
+    use crate::project::{ClipMask, ClipMaskKind};
+
+    if let Some(dir) = cfg.matte_cache_dir.as_ref() {
+        let mask = ClipMask {
+            enabled: true,
+            invert: false,
+            feather: cfg.feather,
+            kind: ClipMaskKind::Generated {
+                cache_dir: dir.clone(),
+            },
+        };
+        crate::mask::apply_clip_mask(frame, &mask);
+        return;
+    }
+    // Live heuristic matte when no cache has been baked yet.
+    let matte = crate::mask::generate_heuristic_matte(frame, cfg.threshold);
+    crate::mask::apply_luma_matte(frame, &matte, false, cfg.feather);
 }
 
 fn active_captions(project: &Project, t: f64) -> Vec<ActiveCaption> {

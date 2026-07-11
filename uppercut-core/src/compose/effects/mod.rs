@@ -17,6 +17,7 @@ pub const BUILTIN_EFFECT_IDS: &[&str] = &[
     "builtin:lut_contrast",
     "builtin:lut_warm",
     "builtin:glitch",
+    "builtin:chroma_key",
 ];
 
 /// Public list of builtin effect ids for GUI / CLI discovery.
@@ -47,6 +48,13 @@ pub fn default_params(effect_id: &str) -> BTreeMap<String, f64> {
             m.insert("intensity".into(), 0.5);
             m.insert("slice".into(), 0.5);
         }
+        "builtin:chroma_key" => {
+            m.insert("key_r".into(), 0.0);
+            m.insert("key_g".into(), 1.0);
+            m.insert("key_b".into(), 0.0);
+            m.insert("tolerance".into(), 0.3);
+            m.insert("softness".into(), 0.1);
+        }
         _ => {}
     }
     m
@@ -63,6 +71,8 @@ pub fn clamp_effect_params(effect_id: &str, params: &mut BTreeMap<String, f64>) 
             ("builtin:lut_contrast" | "builtin:lut_warm", "intensity") => v.clamp(0.0, 1.0),
             ("builtin:glitch", "intensity") => v.clamp(0.0, 1.0),
             ("builtin:glitch", "slice") => v.clamp(0.0, 1.0),
+            ("builtin:chroma_key", "key_r" | "key_g" | "key_b") => v.clamp(0.0, 1.0),
+            ("builtin:chroma_key", "tolerance" | "softness") => v.clamp(0.0, 1.0),
             _ => *v,
         };
     }

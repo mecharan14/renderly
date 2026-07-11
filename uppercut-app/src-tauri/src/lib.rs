@@ -15,7 +15,7 @@ use uppercut_core::{
     apply_command as apply_core_command,
     commands::ExportPreset,
     export_project_with_progress,
-    project::{ClipTransform, Project},
+    project::{ClipMask, ClipTransform, Project},
     Command, CommandOutcome, ExportError, ExportPhase, ExportProgress,
 };
 
@@ -957,6 +957,37 @@ async fn preview_transform_override(
     Ok(())
 }
 
+/// Live preview during mask-handle drag: clone session project, patch one clip's
+/// mask ephemerally (no undo / no disk write), render one frame. Throttled by the UI.
+#[tauri::command]
+async fn preview_mask_override(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    track_id: String,
+    clip_id: String,
+    mask: Option<ClipMask>,
+    time_secs: f64,
+) -> Result<(), String> {
+    ensure_preview_parent(&app, &state)?;
+    let track_uuid: uuid::Uuid = track_id.parse().map_err(|e: uuid::Error| e.to_string())?;
+    let clip_uuid: uuid::Uuid = clip_id.parse().map_err(|e: uuid::Error| e.to_string())?;
+    let mut project = state.with_session(|s| Ok(s.project.clone()))?;
+    let track = project
+        .find_track_mut(track_uuid)
+        .ok_or_else(|| format!("track not found: {track_id}"))?;
+    let clip = track
+        .clips
+        .iter_mut()
+        .find(|c| c.id() == clip_uuid)
+        .ok_or_else(|| format!("clip not found: {clip_id}"))?;
+    let media = clip
+        .as_media_mut()
+        .ok_or_else(|| "preview override requires a media clip".to_string())?;
+    media.mask = mask;
+    state.playback.request_preview(app, project, time_secs);
+    Ok(())
+}
+
 /// Render a frame + play a short audio blip at `time_secs` (timeline scrub feedback).
 /// Non-blocking and coalesced — safe to call on every pointermove during a drag.
 #[tauri::command]
@@ -993,6 +1024,7 @@ pub fn run() {
             pause,
             seek,
             preview_transform_override,
+            preview_mask_override,
             scrub_audio,
             request_media_assets,
             get_media_assets,

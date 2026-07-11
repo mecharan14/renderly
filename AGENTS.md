@@ -86,10 +86,9 @@ Before considering a change complete:
 
 ## 4. Current phase
 
-Check PLAN.md §4 for the phase roadmap. **Phase 3 deferred items are complete** (schema v5
-speed ramps, stickers/SFX packs, audio WASM, in-app Extensions + registry index, native
-preview on Windows/macOS/Linux-X11). **Phase 4** (parity march: masks, chroma, tracking,
-etc.) is next.
+Check PLAN.md §4 for the phase roadmap. **Phase 4 is in progress** (schema v6: masks,
+background removal, chroma, audio denoise, tracking/stabilize/reframe, templates,
+multicam). See [docs/parity-board.md](docs/parity-board.md).
 
 ## 5. When in doubt
 

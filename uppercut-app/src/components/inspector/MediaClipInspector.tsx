@@ -3,21 +3,30 @@ import { Trash2, Link2 } from "lucide-react";
 import { useEditorStore } from "../../store/editorStore";
 import {
   deleteClip,
+  generateBackgroundMatte,
   setAudioFade,
   setAudioGain,
+  setClipAudioDenoise,
+  setClipBackgroundRemoval,
   setClipEffects,
   setClipEnabled,
+  setClipMask,
   setClipSpeed,
   setClipTransform,
   setTrackAudioRole,
+  stabilizeClip,
+  trackMotion,
+  autoReframeClip,
   trimClip,
 } from "../../lib/commands";
-import type { ClipTransform, MediaClip, Track, TrackAudioRole } from "../../lib/types";
+import type { ClipMask, ClipTransform, MediaClip, Track, TrackAudioRole } from "../../lib/types";
 import { IDENTITY_TRANSFORM } from "../../lib/types";
+import { defaultMask, switchMaskShape } from "../../lib/maskMath";
 import { MenuSelect } from "../ui/MenuSelect";
 import { Tooltip } from "../ui/Tooltip";
 import { KeyframeEditor } from "./KeyframeEditor";
 import { EffectList } from "../leftpanel/EffectsPanel";
+import * as ipc from "../../lib/ipc";
 
 const AUDIO_ROLES: { value: TrackAudioRole | ""; label: string }[] = [
   { value: "", label: "None" },
@@ -67,6 +76,7 @@ function NumCell({
 export function MediaClipInspector({ track, clip }: { track: Track; clip: MediaClip }) {
   const dispatch = useEditorStore((s) => s.dispatch);
   const select = useEditorStore((s) => s.select);
+  const project = useEditorStore((s) => s.project);
   const media = useEditorStore((s) => s.project?.media.find((m) => m.id === clip.media_id));
 
   const [gain, setGain] = useState(clip.gain_db);
@@ -77,6 +87,8 @@ export function MediaClipInspector({ track, clip }: { track: Track; clip: MediaC
   const [transform, setTransform] = useState<ClipTransform>(() => clipTransform(clip));
   const [speed, setSpeed] = useState(clip.speed ?? 1);
   const [linkScale, setLinkScale] = useState(true);
+  const [maskFeather, setMaskFeather] = useState(clip.mask?.feather ?? 0);
+  const setTool = useEditorStore((s) => s.setTool);
 
   useEffect(() => {
     setGain(clip.gain_db);
@@ -86,6 +98,7 @@ export function MediaClipInspector({ track, clip }: { track: Track; clip: MediaC
     setFadeOut(clip.fade_out_secs);
     setTransform(clipTransform(clip));
     setSpeed(clip.speed ?? 1);
+    setMaskFeather(clip.mask?.feather ?? 0);
   }, [
     clip.id,
     clip.gain_db,
@@ -95,6 +108,7 @@ export function MediaClipInspector({ track, clip }: { track: Track; clip: MediaC
     clip.fade_out_secs,
     clip.transform,
     clip.speed,
+    clip.mask,
   ]);
 
   async function commitTransform(next: ClipTransform) {
@@ -302,6 +316,287 @@ export function MediaClipInspector({ track, clip }: { track: Track; clip: MediaC
                 await dispatch(setClipEffects(track.id, clip.id, next));
               }}
             />
+          </div>
+        </details>
+      )}
+
+      {showTransform && (
+        <details className="insp-disclosure" open={!!clip.mask}>
+          <summary>Mask</summary>
+          <div className="inspector-section insp-disclosure-body">
+            {(() => {
+              const m = clip.mask;
+              const shapeType =
+                m?.kind.type === "rect" || m?.kind.type === "ellipse"
+                  ? m.kind.type
+                  : m?.kind.type === "raster" || m?.kind.type === "generated"
+                    ? m.kind.type
+                    : null;
+              const enabled = m?.enabled ?? true;
+              const invert = m?.invert ?? false;
+              const locked = track.locked;
+
+              const commitMask = (next: ClipMask | null) => {
+                void dispatch(setClipMask(track.id, clip.id, next));
+              };
+
+              const patchMask = (patch: Partial<ClipMask> & { kind?: ClipMask["kind"] }) => {
+                if (!m) return;
+                commitMask({
+                  enabled: patch.enabled ?? enabled,
+                  invert: patch.invert ?? invert,
+                  feather: patch.feather ?? (m.feather ?? 0),
+                  kind: patch.kind ?? m.kind,
+                });
+              };
+
+              return (
+                <>
+                  <p className="empty-hint">
+                    Mask tool (M) · drag on paused preview · Shift=ellipse · Alt=from center
+                  </p>
+                  <div className="insp-btn-row">
+                    <button type="button" disabled={locked} onClick={() => setTool("mask")}>
+                      Mask tool
+                    </button>
+                    {shapeType ? (
+                      <span className="insp-meta muted">· {shapeType}</span>
+                    ) : null}
+                  </div>
+                  <div className="insp-btn-row">
+                    <label className="insp-enable">
+                      <input
+                        type="checkbox"
+                        checked={!!m && enabled}
+                        disabled={locked || !m}
+                        onChange={(e) => patchMask({ enabled: e.target.checked })}
+                      />
+                      <span>Enable</span>
+                    </label>
+                    <label className="insp-enable">
+                      <input
+                        type="checkbox"
+                        checked={!!m && invert}
+                        disabled={locked || !m}
+                        onChange={(e) => patchMask({ invert: e.target.checked })}
+                      />
+                      <span>Invert</span>
+                    </label>
+                  </div>
+                  <label className="insp-cell">
+                    <span>Feather · {maskFeather.toFixed(2)}</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={m ? maskFeather : 0}
+                      disabled={locked || !m}
+                      onChange={(e) => {
+                        if (!m) return;
+                        const v = parseFloat(e.target.value);
+                        setMaskFeather(v);
+                        const next = { ...m, enabled, invert, feather: v };
+                        void ipc.previewMaskOverride(
+                          track.id,
+                          clip.id,
+                          next,
+                          useEditorStore.getState().playhead,
+                        );
+                      }}
+                      onMouseUp={(e) => {
+                        if (!m) return;
+                        const v = parseFloat((e.target as HTMLInputElement).value);
+                        setMaskFeather(v);
+                        void dispatch(
+                          setClipMask(track.id, clip.id, {
+                            ...m,
+                            enabled,
+                            invert,
+                            feather: v,
+                          }),
+                        );
+                      }}
+                      onTouchEnd={(e) => {
+                        if (!m) return;
+                        const v = parseFloat((e.target as HTMLInputElement).value);
+                        setMaskFeather(v);
+                        void dispatch(
+                          setClipMask(track.id, clip.id, {
+                            ...m,
+                            enabled,
+                            invert,
+                            feather: v,
+                          }),
+                        );
+                      }}
+                    />
+                  </label>
+                  {(shapeType === "rect" || shapeType === "ellipse") && (
+                    <div className="insp-btn-row">
+                      <button
+                        type="button"
+                        disabled={locked || shapeType === "rect"}
+                        onClick={() => {
+                          if (!m) return;
+                          const kind = switchMaskShape(m.kind, "rect");
+                          if (kind) patchMask({ kind });
+                        }}
+                      >
+                        As rect
+                      </button>
+                      <button
+                        type="button"
+                        disabled={locked || shapeType === "ellipse"}
+                        onClick={() => {
+                          if (!m) return;
+                          const kind = switchMaskShape(m.kind, "ellipse");
+                          if (kind) patchMask({ kind });
+                        }}
+                      >
+                        As ellipse
+                      </button>
+                    </div>
+                  )}
+                  <div className="insp-btn-row">
+                    <button
+                      type="button"
+                      disabled={locked}
+                      onClick={() =>
+                        commitMask(
+                          defaultMask({ type: "rect", x: 0.15, y: 0.15, width: 0.7, height: 0.7 }),
+                        )
+                      }
+                    >
+                      Rect preset
+                    </button>
+                    <button
+                      type="button"
+                      disabled={locked}
+                      onClick={() =>
+                        commitMask(
+                          defaultMask({
+                            type: "ellipse",
+                            cx: 0.5,
+                            cy: 0.5,
+                            rx: 0.4,
+                            ry: 0.45,
+                          }),
+                        )
+                      }
+                    >
+                      Ellipse preset
+                    </button>
+                    <button
+                      type="button"
+                      disabled={locked || !m}
+                      onClick={() => commitMask(null)}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </details>
+      )}
+
+      {showTransform && (
+        <details className="insp-disclosure">
+          <summary>Background &amp; motion</summary>
+          <div className="inspector-section insp-disclosure-body">
+            <button
+              type="button"
+              disabled={track.locked}
+              onClick={() =>
+                void dispatch(
+                  setClipBackgroundRemoval(track.id, clip.id, {
+                    enabled: true,
+                    model_id: "heuristic",
+                    threshold: 0.15,
+                    feather: 0.1,
+                    temporal: false,
+                  }),
+                )
+              }
+            >
+              Enable BG removal
+            </button>
+            <button
+              type="button"
+              disabled={track.locked}
+              onClick={() => void dispatch(generateBackgroundMatte(track.id, clip.id))}
+            >
+              Bake matte
+            </button>
+            <button
+              type="button"
+              disabled={track.locked}
+              onClick={() => void dispatch(setClipBackgroundRemoval(track.id, clip.id, null))}
+            >
+              Clear BG removal
+            </button>
+            <button
+              type="button"
+              disabled={track.locked}
+              onClick={() => void dispatch(stabilizeClip(track.id, clip.id))}
+            >
+              Stabilize
+            </button>
+            <button
+              type="button"
+              disabled={track.locked}
+              onClick={() => void dispatch(trackMotion(track.id, clip.id, 12))}
+            >
+              Track motion
+            </button>
+            <button
+              type="button"
+              disabled={track.locked}
+              onClick={() =>
+                void dispatch(
+                  autoReframeClip(
+                    track.id,
+                    clip.id,
+                    (project?.settings.width ?? 1080) / (project?.settings.height ?? 1920),
+                  ),
+                )
+              }
+            >
+              Auto-reframe
+            </button>
+          </div>
+        </details>
+      )}
+
+      {showAudio && (
+        <details className="insp-disclosure">
+          <summary>Denoise</summary>
+          <div className="inspector-section insp-disclosure-body">
+            <button
+              type="button"
+              disabled={track.locked || track.kind !== "audio"}
+              onClick={() =>
+                void dispatch(
+                  setClipAudioDenoise(track.id, clip.id, {
+                    enabled: true,
+                    backend: "afftdn",
+                    strength: 0.5,
+                  }),
+                )
+              }
+            >
+              Enable afftdn
+            </button>
+            <button
+              type="button"
+              disabled={track.locked}
+              onClick={() => void dispatch(setClipAudioDenoise(track.id, clip.id, null))}
+            >
+              Clear denoise
+            </button>
+            <p className="empty-hint">Audio-track clips only (v1).</p>
           </div>
         </details>
       )}

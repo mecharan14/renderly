@@ -1,12 +1,12 @@
 # Architecture
 
-Status: **Phase 3 complete (1A/2A).** Export drives FFmpeg subprocess decode/encode with an
-offscreen wgpu compositor; the Tauri app adds a native wgpu preview surface on Windows.
-Schema v4 covers clip transform / keyframes / builtins (incl. glitch) / ten WGSL transitions /
-clip speed, plus asset packs and a wasmtime frame-effect host. See
-[asset-pack.md](asset-pack.md) and [plugin-api.md](plugin-api.md). Native preview on
-macOS/Linux remains stubbed; CI runs on Windows/macOS/Linux. Manual QA:
-[qa-checklist.md](qa-checklist.md).
+Status: **Phase 3 complete; Phase 4 in progress.** Export drives FFmpeg subprocess
+decode/encode with an offscreen wgpu compositor. Schema **v5** covers clip transform /
+keyframes (incl. Speed) / builtins (incl. glitch) / ten WGSL transitions / clip speed,
+asset packs (LUTs, stickers, SFX), and a wasmtime frame+audio plugin host. See
+[asset-pack.md](asset-pack.md) and [plugin-api.md](plugin-api.md). Native preview is
+cross-platform (Win32 HWND, AppKit NSView, Linux/X11 child window; Wayland deferred).
+CI runs on Windows/macOS/Linux. Manual QA: [qa-checklist.md](qa-checklist.md).
 
 ## Crate graph
 
@@ -38,10 +38,11 @@ Owns:
 - **Media I/O** — FFmpeg-backed decode/encode. Phase 0 invokes `ffmpeg`/`ffprobe` as
   subprocesses (no link-time libav dependency); migrate to `ffmpeg-the-third` when dev/CI
   ships FFmpeg development libraries consistently.
-- **Compositing** — wgpu offscreen render graph (Phase 0: cover-fit scale/blit; Phase 3.1:
-  per-layer user translate/scale/rotate + opacity; Phase 3.4: builtin effect chain —
-  color_adjust / separable blur / embedded lut_contrast+lut_warm; Phase 3.5: dual-layer
-  crossfade during `outgoing_transition`). WASM plugins / asset packs are later.
+- **Compositing** — wgpu offscreen render graph (cover-fit scale/blit; per-layer
+  translate/scale/rotate + opacity; builtin effect chain — color_adjust / blur /
+  lut_contrast+lut_warm / glitch; dual-layer transitions). Pack LUTs and WASM frame
+  effects run on CPU before GPU upload. Phase 4 adds clip masks / mattes and
+  chroma / background-removal on the shared alpha path.
 - **Perception** — frame rendering to image, transcript (whisper-rs), scene/silence
   detection. These back the MCP perception tools and are engine functions, not MCP-specific
   code, so the CLI can expose them too.
@@ -102,7 +103,10 @@ Two rendering surfaces coexist in one window:
   `uppercut-core`. Never proxies frames through the webview/JS bridge. The surface is
   click-through so overlay controls stay interactive. Preview bounds are synced from
   `#preview-host`'s letterboxed content rect (`set_preview_bounds`) so they stay aligned
-  when the custom titlebar height changes. Linux/Wayland is not supported yet.
+  when the custom titlebar height changes. Transform and mask authoring use webview
+  overlays (`PreviewHandlesOverlay` / `PreviewMaskOverlay`) with ephemeral
+  `preview_transform_override` / `preview_mask_override` during drag and a single
+  undoable command on mouseup. Linux/Wayland is not supported yet.
 
 **Timeline architecture:** the canvas timeline is deliberately *not* a React render
 target. `uppercut-app/src/timeline/renderer.ts` is a pure `(canvas, state) => void` draw
@@ -127,8 +131,8 @@ drag with a ghost preview and CapCut-style auto-track-on-drop, right-click `Cont
 `App.tsx`'s `onKeyDown`), transport with editable timecode + ±1 frame buttons + fullscreen
 preview (Esc exits; bounds recompute), aspect-ratio quick-switch (`RatioMenu` →
 `SetProjectSettings`, including Original from first video media dims), tab rail
-(Media/Audio/Text live; Stickers/Effects/Transitions/Filters/Adjustment stubbed for
-Phase 3), inspectors (video/audio clip with gain/fades/enable/trim, caption style gallery,
+(Media/Audio/Text/Stickers/Effects/Transitions/Filters/Adjust/Extensions live),
+  inspectors (video/audio clip with gain/fades/enable/trim, caption style gallery,
 project canvas settings), Text panel auto-captions + Audio panel TTS voiceover, export
 dialog with progress bar / ETA / cancel (M6), M7 polish (Coming Soon panels, empty states,
 media skeletons, focus rings / scrollbars, `playback:error` toasts, pause-on-edit).

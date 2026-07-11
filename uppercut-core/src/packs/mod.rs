@@ -22,6 +22,18 @@ pub struct PackManifest {
     pub stickers: Vec<PackSticker>,
     #[serde(default)]
     pub sfx: Vec<PackSfx>,
+    /// Named command sequences applied via `ApplyTemplate` (Phase 4).
+    #[serde(default)]
+    pub templates: Vec<PackTemplate>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PackTemplate {
+    pub id: String,
+    pub label: String,
+    /// Serialized `Command` values; `AddClip.position_secs` is offset by the apply call.
+    #[serde(default)]
+    pub commands: Vec<serde_json::Value>,
 }
 
 fn default_pack_version() -> String {

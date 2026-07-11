@@ -12,7 +12,7 @@ import {
   type TrackKind,
 } from "../lib/types";
 
-export type ToolMode = "select" | "razor";
+export type ToolMode = "select" | "razor" | "mask";
 export type LeftTab =
   | "media"
   | "audio"
