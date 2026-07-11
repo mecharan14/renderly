@@ -87,11 +87,9 @@ Before considering a change complete:
 ## 4. Current phase
 
 Check PLAN.md §4 for the phase roadmap. **Phase 2 GUI rebuild (M0–M7) is complete.**
-**Phase 3 is in progress:** **3.1 foundation landed** — schema v2 (`ClipTransform`,
-keyframe tracks, effect-instance slots), `SetClipTransform` / `SetClipKeyframes` /
-`SetClipEffects`, compositor transform+opacity (+ audio volume keyframes), minimal
-inspector transform fields. Later 3.x: preview handles, real effects/transitions, WASM
-plugins, asset packs.
+**Phase 3 is in progress:** **3.1–3.5 landed** — schema v3 (`ClipTransform`, keyframes,
+builtin effects, `outgoing_transition` crossfade), preview transform handles, keyframe
+editor, Effects/Transitions panels. Later: WASM plugins, asset packs, macOS/Linux preview.
 
 ## 5. When in doubt
 

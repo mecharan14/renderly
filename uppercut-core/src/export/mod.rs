@@ -84,10 +84,12 @@ impl ExportSettings {
 }
 
 struct ActiveLayer {
-    track_id: uuid::Uuid,
+    /// Decoder cache key (usually track id; crossfade incoming uses a derived key).
+    decoder_key: uuid::Uuid,
     path: PathBuf,
     source_time: f64,
     transform: ClipTransform,
+    effects: Vec<crate::project::EffectInstance>,
 }
 
 struct ActiveCaption {
@@ -181,11 +183,11 @@ impl FrameRenderer {
             // process's playback position instead of decoding independently.
             let decoder = self
                 .decoders
-                .entry(layer.track_id)
+                .entry(layer.decoder_key)
                 .or_insert_with(|| DecoderState::new(layer.path.clone(), reader_opts));
-            // A track's active clip can reference a different media item than the decoder
-            // currently open for this track_id (e.g. a cut to a different source clip on
-            // the same track) — force a fresh decoder rather than reading the wrong file.
+            // An active layer can reference a different media item than the decoder
+            // currently open for this key (e.g. a cut to a different source clip) —
+            // force a fresh decoder rather than reading the wrong file.
             if decoder.path != layer.path {
                 *decoder = DecoderState::new(layer.path.clone(), reader_opts);
             }
@@ -193,6 +195,7 @@ impl FrameRenderer {
                 compose_layers.push(ComposeLayer {
                     frame,
                     transform: layer.transform,
+                    effects: layer.effects.clone(),
                 });
             }
         }
@@ -206,6 +209,7 @@ impl FrameRenderer {
                     self.settings.height,
                 )?,
                 transform: ClipTransform::default(),
+                effects: Vec::new(),
             });
         }
 
@@ -541,6 +545,86 @@ fn active_layers(project: &Project, t: f64) -> Result<Vec<ActiveLayer>, ExportEr
         if track.kind != TrackKind::Video || track.hidden {
             continue;
         }
+
+        let mut video_clips: Vec<&crate::project::MediaClip> = track
+            .clips
+            .iter()
+            .filter_map(|c| match c {
+                Clip::Video(v) if v.enabled => Some(v),
+                _ => None,
+            })
+            .collect();
+        video_clips.sort_by(|a, b| {
+            a.position_secs
+                .partial_cmp(&b.position_secs)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Crossfade: during [cut-d, cut) emit outgoing + incoming with complementary opacity.
+        let mut handled = false;
+        for (i, v) in video_clips.iter().enumerate() {
+            let start = v.position_secs;
+            let end = start + (v.source_out_secs - v.source_in_secs);
+            let Some(tr) = v.outgoing_transition.as_ref() else {
+                continue;
+            };
+            let d = tr.duration_secs;
+            if d <= 0.0 {
+                continue;
+            }
+            let window_start = end - d;
+            if t < window_start || t >= end {
+                continue;
+            }
+            let Some(incoming) = video_clips.get(i + 1).copied() else {
+                continue;
+            };
+            // Incoming must abut (or nearly abut) this cut for renderer-only overlap.
+            if (incoming.position_secs - end).abs() > 0.05 && incoming.position_secs < end - 1e-6 {
+                continue;
+            }
+
+            let u = ((t - window_start) / d).clamp(0.0, 1.0);
+            let out_media = project
+                .find_media(v.media_id)
+                .ok_or(ExportError::MediaNotFound(v.media_id))?;
+            let in_media = project
+                .find_media(incoming.media_id)
+                .ok_or(ExportError::MediaNotFound(incoming.media_id))?;
+            if out_media.kind != MediaKind::Video && out_media.kind != MediaKind::Image {
+                return Err(ExportError::NotVideo(v.media_id));
+            }
+            if in_media.kind != MediaKind::Video && in_media.kind != MediaKind::Image {
+                return Err(ExportError::NotVideo(incoming.media_id));
+            }
+
+            let mut out_xf = evaluate_transform(v, t);
+            out_xf.opacity *= 1.0 - u;
+            let mut in_xf = evaluate_transform(incoming, incoming.position_secs);
+            in_xf.opacity *= u;
+
+            layers.push(ActiveLayer {
+                decoder_key: track.id,
+                path: out_media.path.clone(),
+                source_time: v.source_in_secs + (t - start),
+                transform: out_xf,
+                effects: v.effects.clone(),
+            });
+            layers.push(ActiveLayer {
+                // Distinct from track.id so FrameRenderer keeps a second decoder open.
+                decoder_key: uuid::Uuid::from_u128(track.id.as_u128() ^ 0xC0_FF_EE_51_u128),
+                path: in_media.path.clone(),
+                source_time: incoming.source_in_secs + (t - window_start),
+                transform: in_xf,
+                effects: incoming.effects.clone(),
+            });
+            handled = true;
+            break;
+        }
+        if handled {
+            continue;
+        }
+
         for clip in &track.clips {
             let Clip::Video(v) = clip else { continue };
             if !v.enabled {
@@ -557,10 +641,11 @@ fn active_layers(project: &Project, t: f64) -> Result<Vec<ActiveLayer>, ExportEr
                 }
                 let source_time = v.source_in_secs + (t - start);
                 layers.push(ActiveLayer {
-                    track_id: track.id,
+                    decoder_key: track.id,
                     path: media.path.clone(),
                     source_time,
                     transform: evaluate_transform(v, t),
+                    effects: v.effects.clone(),
                 });
                 break;
             }

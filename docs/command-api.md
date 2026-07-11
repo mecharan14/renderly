@@ -1,6 +1,6 @@
 # Command API
 
-Status: **current** (matches project schema v2). This is the source of truth for the `Command` enum and
+Status: **current** (matches project schema v3). This is the source of truth for the `Command` enum and
 `apply_command` in `uppercut-core`. GUI, CLI, and MCP must all dispatch through this exact
 set (see AGENTS.md §0.1) — none of them may mutate `Project` state any other way.
 
@@ -30,6 +30,7 @@ pub enum Command {
     SetClipTransform { track_id: Id, clip_id: Id, transform: ClipTransform },
     SetClipKeyframes { track_id: Id, clip_id: Id, keyframes: Vec<KeyframeTrack> },
     SetClipEffects { track_id: Id, clip_id: Id, effects: Vec<EffectInstance> },
+    SetClipTransition { track_id: Id, clip_id: Id, transition: Option<ClipTransition> },
     Export { output_path: String, preset: ExportPreset },
 }
 
@@ -212,17 +213,27 @@ finite times, finite values, opacity keys in `0..=1`; sorts keys by time on writ
 
 - Errors: track/clip not found, not a media clip, or invalid keyframe data.
 
-### `SetClipEffects` (Phase 3.1)
-Replaces the effect-instance list on a media clip. Store-only in 3.1 (no render path).
-Validates unique instance ids, non-empty `effect_id`, finite params.
+### `SetClipEffects` (Phase 3.1 / 3.4)
+Replaces the effect-instance list on a media clip. Validates unique instance ids, known
+builtin `effect_id`s (`builtin:color_adjust`, `builtin:blur`, `builtin:lut_contrast`,
+`builtin:lut_warm`), finite params, and clamps known params to reasonable ranges.
+Enabled instances are executed by the compositor (Phase 3.4).
 
 - Errors: track/clip not found, not a media clip, or invalid effect list.
+
+### `SetClipTransition` (Phase 3.5)
+Sets or clears (`None`) the outgoing `ClipTransition` on a video media clip. Only
+`crossfade` is supported. Requires a following clip on the same track; duration must be
+`> 0` and ≤ half of each adjacent clip.
+
+- Errors: not a video track, no following clip, invalid duration.
 
 ### `Export`
 Renders the current `Project` timeline to `output_path` using `preset` (e.g.
 `TikTok9x16`, `Youtube16x9`, or a `Custom { width, height, fps }` variant). Muxes mixed
 audio (with fades and optional music ducking) and burns caption clips. Video layers honor
-evaluated transform+opacity; audio mix uses evaluated volume (including Volume keyframes).
+evaluated transform+opacity and enabled builtin effects; audio mix uses evaluated volume
+(including Volume keyframes).
 
 `Export` does not mutate `Project`. Progress / cancel for interactive clients go through
 `uppercut_core::export::export_project_with_progress` (GUI Tauri command + CLI status
@@ -246,10 +257,9 @@ command, which is sufficient for scripted/agent use.
 
 ## Non-goals for later Phase 3
 
-Preview transform handles, effect shaders / LUT / blur execution, transitions, WASM plugin
-invocation, and asset-pack commands are later milestones — see
-[project-schema.md](project-schema.md) "What's intentionally not in v2 yet". Do not add a
-command for a feature that has no schema representation yet.
+WASM plugin invocation, asset-pack commands, and additional transition kinds are later
+milestones — see [project-schema.md](project-schema.md) "What's intentionally not in v3 yet".
+Do not add a command for a feature that has no schema representation yet.
 
 ## Version history
 
@@ -264,3 +274,8 @@ command for a feature that has no schema representation yet.
   for cooperative cancel; GUI emits `export:progress` (~10 Hz) and exposes `cancel_export`.
 - **Phase 3.1** (project schema v2): added `SetClipTransform`, `SetClipKeyframes`,
   `SetClipEffects`; `SplitClip` inherits transform / splits keyframes / remints effect ids.
+- **Phase 3.4**: `SetClipEffects` executes builtin WGSL effects.
+- **Phase 3.5** (project schema v3): added `SetClipTransition` (crossfade).
+
+- **Phase 3.4** (non-breaking): `SetClipEffects` validates known builtin ids + param
+  clamps; compositor executes `builtin:color_adjust` / `blur` / `lut_contrast` / `lut_warm`.

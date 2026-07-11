@@ -6,7 +6,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import type { Project } from "./types";
+import type { ClipTransform, Project } from "./types";
 
 export interface HistoryStatus {
   can_undo: boolean;
@@ -170,6 +170,21 @@ export function seek(timeSecs: number): Promise<void> {
 
 export function scrubAudio(timeSecs: number): Promise<void> {
   return invoke("scrub_audio", { timeSecs });
+}
+
+/** Ephemeral transform for live preview-handle drag (no undo / no session write). */
+export function previewTransformOverride(
+  trackId: string,
+  clipId: string,
+  transform: ClipTransform,
+  timeSecs: number,
+): Promise<void> {
+  return invoke("preview_transform_override", {
+    trackId,
+    clipId,
+    transform,
+    timeSecs,
+  });
 }
 
 // ---- Events ----

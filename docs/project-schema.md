@@ -1,4 +1,4 @@
-# Project schema — v2
+# Project schema — v3
 
 Status: **current**. This is the source of truth for `uppercut-core`'s project
 model. Implementation types in `uppercut-core/src/project/` must match this document; if
@@ -12,7 +12,7 @@ extension `.uppercut.json`.
 
 ```jsonc
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "b3f1c2a0-...-uuid",
   "name": "ultra-bruno-ep12",
   "settings": {
@@ -29,7 +29,7 @@ extension `.uppercut.json`.
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | u32 | `2` for this spec. Loaders accept `1` and `2` (`MIN_LOADABLE_SCHEMA_VERSION = 1`); reject unknown newer versions rather than guess. Saves always write `2`. |
+| `schema_version` | u32 | `3` for this spec. Loaders accept `1`..=`3` (`MIN_LOADABLE_SCHEMA_VERSION = 1`); reject unknown newer versions rather than guess. Saves always write `3`. |
 | `id` | string (UUIDv4) | Stable project identity, generated on creation. |
 | `name` | string | Human-facing project name; not used for file paths. |
 | `settings.fps` | f64 | Timeline/output frame rate. |
@@ -119,7 +119,8 @@ serialized with `#[serde(tag = "type")]`.)
     "opacity": 1.0              // 0..1
   },
   "keyframes": [],              // Phase 3.1 — KeyframeTrack[] (see below)
-  "effects": []                 // Phase 3.1 — EffectInstance[] (store-only; no render path yet)
+  "effects": [],                // Phase 3.4 — EffectInstance[] (builtin shaders executed)
+  "outgoing_transition": null   // Phase 3.5 — optional ClipTransition (video tracks)
 }
 ```
 
@@ -144,19 +145,42 @@ per `property`. Keys are sorted by `time_secs` on write. `Volume` keyframe value
 absolute dB and replace static `gain_db` when present. Evaluation: `evaluate_transform` /
 `evaluate_volume_db` in `uppercut-core` (playback + export share the same path).
 
-#### EffectInstance (Phase 3.1 store-only)
+#### EffectInstance (Phase 3.4 builtins)
 
 ```jsonc
 {
   "id": "effect-instance-uuid",
-  "effect_id": "builtin:blur",   // opaque; not executed in 3.1
+  "effect_id": "builtin:blur",   // see builtin list below
   "enabled": true,
   "params": { "radius": 4.0 }
 }
 ```
 
-Round-trips in JSON and survives `SplitClip` (right half gets fresh instance ids). Pixel
-shaders / registry land in later Phase 3 milestones.
+Round-trips in JSON and survives `SplitClip` (right half gets fresh instance ids). The
+compositor executes enabled builtins (Phase 3.4):
+
+| `effect_id` | Params (defaults) |
+|---|---|
+| `builtin:color_adjust` | `exposure` (0), `contrast` (1), `saturation` (1) |
+| `builtin:blur` | `radius` px (0); separable Gaussian, two passes |
+| `builtin:lut_contrast` | `intensity` (1); embedded S-curve grade |
+| `builtin:lut_warm` | `intensity` (1); embedded warm color matrix |
+
+No external `.cube` LUT files. Unknown `effect_id`s are rejected by `SetClipEffects`.
+Discover ids via `uppercut_core::compose::builtin_effect_ids()`.
+
+#### ClipTransition (Phase 3.5)
+
+```jsonc
+{
+  "kind": "crossfade",
+  "duration_secs": 0.5
+}
+```
+
+Optional on media clips as `outgoing_transition`. Timeline clips stay non-overlapping; during
+`[cut - d, cut)` the renderer decodes both adjacent clips and blends opacities. Duration
+must be `> 0` and ≤ half of each adjacent clip. Video tracks only in 3.5.
 
 ### CaptionClip
 
@@ -175,12 +199,10 @@ Word-level timing (for word-by-word highlight caption styles) is deliberately de
 v0 captions are line-level. Add a `words: [{ text, start_offset_secs, end_offset_secs }]`
 field in a later schema version once the caption renderer needs it — don't add it unused.
 
-## What's intentionally not in v2 yet
+## What's intentionally not in v3 yet
 
-Transitions, real effect shaders / LUTs / blur, WASM plugin host, asset packs, preview
-transform handles, and multi-cam are later Phase 3+ milestones (PLAN.md §4). Schema slots
-for `transform` / `keyframes` / `effects` exist; only transform+opacity (+ volume
-keyframes for audio) affect pixels/samples in 3.1.
+WASM plugin host, asset packs, community registry, additional transition kinds (wipe/slide),
+macOS/Linux native preview, and multi-cam are later milestones (PLAN.md §4).
 
 ## Version history
 
@@ -192,3 +214,5 @@ keyframes for audio) affect pixels/samples in 3.1.
   load unchanged (fields default to `false`); no migration required.
 - **v2** (Phase 3.1 foundation): `MediaClip.transform`, `keyframes`, `effects`. v1 files
   load with identity/empty defaults via `#[serde(default)]`; saves write `schema_version: 2`.
+- **v3** (Phase 3.5): `MediaClip.outgoing_transition` (`ClipTransition`). Older files load
+  with `null`; saves write `schema_version: 3`.

@@ -15,6 +15,8 @@ import { MediaPanel } from "./MediaPanel";
 import { AudioPanel } from "./AudioPanel";
 import { TextPanel } from "./TextPanel";
 import { ComingSoonPanel } from "./ComingSoonPanel";
+import { EffectsPanel } from "./EffectsPanel";
+import { TransitionsPanel } from "./TransitionsPanel";
 
 const TABS: { id: LeftTab; icon: LucideIcon; label: string }[] = [
   { id: "media", icon: Film, label: "Media" },
@@ -29,8 +31,6 @@ const TABS: { id: LeftTab; icon: LucideIcon; label: string }[] = [
 
 const STUB_PITCH: Record<string, string> = {
   stickers: "Drop in animated stickers and shape overlays.",
-  effects: "Screen-space video effects and generators.",
-  transitions: "Cross-track cut, dissolve, and wipe transitions.",
   filters: "One-click color grading presets.",
   adjustment: "Manual exposure, contrast, and color wheels.",
 };
@@ -62,9 +62,16 @@ export function LeftPanel() {
         {leftTab === "media" && <MediaPanel />}
         {leftTab === "audio" && <AudioPanel />}
         {leftTab === "text" && <TextPanel />}
-        {leftTab !== "media" && leftTab !== "audio" && leftTab !== "text" && active && (
-          <ComingSoonPanel icon={active.icon} title={active.label} pitch={STUB_PITCH[leftTab] ?? ""} />
-        )}
+        {leftTab === "effects" && <EffectsPanel />}
+        {leftTab === "transitions" && <TransitionsPanel />}
+        {leftTab !== "media" &&
+          leftTab !== "audio" &&
+          leftTab !== "text" &&
+          leftTab !== "effects" &&
+          leftTab !== "transitions" &&
+          active && (
+            <ComingSoonPanel icon={active.icon} title={active.label} pitch={STUB_PITCH[leftTab] ?? ""} />
+          )}
       </div>
     </aside>
   );

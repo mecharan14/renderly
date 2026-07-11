@@ -5,7 +5,8 @@ use crate::audio::{synthesize_to_wav, VoiceoverProvider};
 use crate::media::{self, MediaError};
 use crate::project::{
     clone_effects_with_new_ids, split_keyframes, AnimProperty, CaptionClip, Clip, ClipTransform,
-    EffectInstance, Id, KeyframeTrack, MediaClip, Project, Track, TrackAudioRole, TrackKind,
+    ClipTransition, EffectInstance, Id, KeyframeTrack, MediaClip, Project, Track, TrackAudioRole,
+    TrackKind, TransitionKind,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -148,11 +149,17 @@ pub enum Command {
         clip_id: Id,
         keyframes: Vec<KeyframeTrack>,
     },
-    /// Replace effect instance list (store-only in 3.1; no render path).
+    /// Replace effect instance list (Phase 3.4 executes builtins).
     SetClipEffects {
         track_id: Id,
         clip_id: Id,
         effects: Vec<EffectInstance>,
+    },
+    /// Set or clear the outgoing transition on a video media clip (Phase 3.5).
+    SetClipTransition {
+        track_id: Id,
+        clip_id: Id,
+        transition: Option<ClipTransition>,
     },
 }
 
@@ -229,6 +236,8 @@ pub enum CommandError {
     InvalidKeyframes(String),
     #[error("invalid effects: {0}")]
     InvalidEffects(String),
+    #[error("invalid transition: {0}")]
+    InvalidTransition(String),
     #[error("not yet implemented: {0}")]
     NotImplemented(&'static str),
 }
@@ -378,6 +387,11 @@ pub fn apply_command(project: &mut Project, cmd: Command) -> Result<CommandOutco
             clip_id,
             effects,
         } => set_clip_effects(project, track_id, clip_id, effects),
+        Command::SetClipTransition {
+            track_id,
+            clip_id,
+            transition,
+        } => set_clip_transition(project, track_id, clip_id, transition),
     }
 }
 
@@ -566,6 +580,7 @@ fn split_clip(
             m.keyframes = left_kf;
             right_m.keyframes = right_kf;
             right_m.effects = clone_effects_with_new_ids(&m.effects);
+            right_m.outgoing_transition = None;
             (Clip::Video(m), Clip::Video(right_m))
         }
         Clip::Audio(mut m) => {
@@ -578,6 +593,7 @@ fn split_clip(
             m.keyframes = left_kf;
             right_m.keyframes = right_kf;
             right_m.effects = clone_effects_with_new_ids(&m.effects);
+            right_m.outgoing_transition = None;
             (Clip::Audio(m), Clip::Audio(right_m))
         }
         Clip::Caption(mut c) => {
@@ -1162,10 +1178,19 @@ fn validate_keyframes(tracks: Vec<KeyframeTrack>) -> Result<Vec<KeyframeTrack>, 
 }
 
 fn validate_effects(effects: Vec<EffectInstance>) -> Result<Vec<EffectInstance>, CommandError> {
+    use crate::compose::effects::{clamp_effect_params, is_builtin_effect_id};
+
     let mut ids = std::collections::HashSet::new();
-    for effect in &effects {
+    let mut out = Vec::with_capacity(effects.len());
+    for mut effect in effects {
         if effect.effect_id.trim().is_empty() {
             return Err(CommandError::InvalidEffects("empty effect_id".into()));
+        }
+        if !is_builtin_effect_id(&effect.effect_id) {
+            return Err(CommandError::InvalidEffects(format!(
+                "unknown effect_id '{}'",
+                effect.effect_id
+            )));
         }
         if !ids.insert(effect.id) {
             return Err(CommandError::InvalidEffects(format!(
@@ -1180,8 +1205,10 @@ fn validate_effects(effects: Vec<EffectInstance>) -> Result<Vec<EffectInstance>,
                 )));
             }
         }
+        clamp_effect_params(&effect.effect_id, &mut effect.params);
+        out.push(effect);
     }
-    Ok(effects)
+    Ok(out)
 }
 
 fn set_clip_transform(
@@ -1217,6 +1244,80 @@ fn set_clip_effects(
     let effects = validate_effects(effects)?;
     let clip = media_clip_mut(project, track_id, clip_id)?;
     clip.effects = effects;
+    Ok(CommandOutcome::Applied)
+}
+
+fn set_clip_transition(
+    project: &mut Project,
+    track_id: Id,
+    clip_id: Id,
+    transition: Option<ClipTransition>,
+) -> Result<CommandOutcome, CommandError> {
+    let track_kind = project
+        .find_track(track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?
+        .kind;
+    if track_kind != TrackKind::Video {
+        return Err(CommandError::InvalidTransition(
+            "transitions are only supported on video tracks".into(),
+        ));
+    }
+
+    if let Some(ref t) = transition {
+        if !matches!(t.kind, TransitionKind::Crossfade) {
+            return Err(CommandError::InvalidTransition(
+                "only crossfade is supported".into(),
+            ));
+        }
+        if !t.duration_secs.is_finite() || t.duration_secs <= 0.0 {
+            return Err(CommandError::InvalidTransition(
+                "duration_secs must be > 0".into(),
+            ));
+        }
+
+        let track = project
+            .find_track(track_id)
+            .ok_or(CommandError::TrackNotFound(track_id))?;
+        let clip = track
+            .clips
+            .iter()
+            .find(|c| c.id() == clip_id)
+            .ok_or(CommandError::ClipNotFound(clip_id, track_id))?
+            .as_media()
+            .ok_or(CommandError::NotMediaClip(clip_id))?;
+        let clip_dur = clip.source_out_secs - clip.source_in_secs;
+        if t.duration_secs > clip_dur / 2.0 + 1e-9 {
+            return Err(CommandError::InvalidTransition(
+                "duration must be <= half the clip duration".into(),
+            ));
+        }
+        let end = clip.position_secs + clip_dur;
+        let mut nexts: Vec<&MediaClip> = track
+            .clips
+            .iter()
+            .filter_map(|c| c.as_media())
+            .filter(|m| m.id != clip_id && m.enabled && m.position_secs >= end - 1e-6)
+            .collect();
+        nexts.sort_by(|a, b| {
+            a.position_secs
+                .partial_cmp(&b.position_secs)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let Some(next) = nexts.first() else {
+            return Err(CommandError::InvalidTransition(
+                "no following clip on this track".into(),
+            ));
+        };
+        let next_dur = next.source_out_secs - next.source_in_secs;
+        if t.duration_secs > next_dur / 2.0 + 1e-9 {
+            return Err(CommandError::InvalidTransition(
+                "duration must be <= half the next clip duration".into(),
+            ));
+        }
+    }
+
+    let clip = media_clip_mut(project, track_id, clip_id)?;
+    clip.outgoing_transition = transition;
     Ok(CommandOutcome::Applied)
 }
 
@@ -2839,11 +2940,32 @@ mod tests {
                     },
                     EffectInstance {
                         id: effect_id,
-                        effect_id: "builtin:lut".into(),
+                        effect_id: "builtin:lut_warm".into(),
                         enabled: true,
                         params: Default::default(),
                     },
                 ],
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::InvalidEffects(_)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn set_clip_effects_rejects_unknown_effect_id() {
+        let (mut project, track_id, clip_id, dir) = setup_audio_clip();
+        let err = apply_command(
+            &mut project,
+            Command::SetClipEffects {
+                track_id,
+                clip_id,
+                effects: vec![EffectInstance {
+                    id: Id::new_v4(),
+                    effect_id: "builtin:not_a_real_effect".into(),
+                    enabled: true,
+                    params: Default::default(),
+                }],
             },
         )
         .unwrap_err();
@@ -2947,6 +3069,116 @@ mod tests {
         assert_eq!(left.effects[0].id, effect_id);
         assert_ne!(right.effects[0].id, effect_id);
         assert_eq!(right.effects[0].effect_id, "builtin:blur");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn set_clip_transition_requires_following_video_clip() {
+        let dir = std::env::temp_dir().join(format!("uppercut-test-{}", Id::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Use wav on video track? Need video media — use two audio on video track won't work.
+        // Build minimal project with video clips via direct struct insert.
+        let mut project = test_project();
+        let track_id = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Video,
+                name: "V1".into(),
+                id: None,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        let media_a = Id::new_v4();
+        let media_b = Id::new_v4();
+        project.media.push(crate::project::MediaItem {
+            id: media_a,
+            path: dir.join("a.mp4"),
+            kind: crate::project::MediaKind::Video,
+            duration_secs: Some(10.0),
+            width: Some(1280),
+            height: Some(720),
+            fps: Some(30.0),
+        });
+        project.media.push(crate::project::MediaItem {
+            id: media_b,
+            path: dir.join("b.mp4"),
+            kind: crate::project::MediaKind::Video,
+            duration_secs: Some(10.0),
+            width: Some(1280),
+            height: Some(720),
+            fps: Some(30.0),
+        });
+        let clip_a = Id::new_v4();
+        let clip_b = Id::new_v4();
+        let track = project.find_track_mut(track_id).unwrap();
+        track.clips.push(Clip::Video(MediaClip {
+            id: clip_a,
+            media_id: media_a,
+            position_secs: 0.0,
+            source_in_secs: 0.0,
+            source_out_secs: 4.0,
+            ..MediaClip::default()
+        }));
+        track.clips.push(Clip::Video(MediaClip {
+            id: clip_b,
+            media_id: media_b,
+            position_secs: 4.0,
+            source_in_secs: 0.0,
+            source_out_secs: 4.0,
+            ..MediaClip::default()
+        }));
+
+        apply_command(
+            &mut project,
+            Command::SetClipTransition {
+                track_id,
+                clip_id: clip_a,
+                transition: Some(ClipTransition {
+                    kind: TransitionKind::Crossfade,
+                    duration_secs: 0.5,
+                }),
+            },
+        )
+        .unwrap();
+        let clip = project
+            .find_track(track_id)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id() == clip_a)
+            .unwrap()
+            .as_media()
+            .unwrap();
+        assert_eq!(
+            clip.outgoing_transition.as_ref().unwrap().duration_secs,
+            0.5
+        );
+
+        apply_command(
+            &mut project,
+            Command::SetClipTransition {
+                track_id,
+                clip_id: clip_a,
+                transition: None,
+            },
+        )
+        .unwrap();
+        assert!(project
+            .find_track(track_id)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id() == clip_a)
+            .unwrap()
+            .as_media()
+            .unwrap()
+            .outgoing_transition
+            .is_none());
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -1,4 +1,4 @@
-//! Project schema v2 — matches docs/project-schema.md exactly.
+//! Project schema v3 — matches docs/project-schema.md exactly.
 //! If you change a type here, update that doc in the same change.
 
 use serde::{Deserialize, Serialize};
@@ -11,9 +11,9 @@ pub use anim::{evaluate_transform, evaluate_volume_db};
 
 pub type Id = uuid::Uuid;
 
-/// Current on-disk schema. Loaders accept `1` and `2` (v1 files get serde defaults for
-/// new fields); new projects and saves write `2`.
-pub const SCHEMA_VERSION: u32 = 2;
+/// Current on-disk schema. Loaders accept `1`..=`3` (older files get serde defaults for
+/// new fields); new projects and saves write `3`.
+pub const SCHEMA_VERSION: u32 = 3;
 pub const MIN_LOADABLE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,7 +303,8 @@ pub struct KeyframeTrack {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectInstance {
     pub id: Id,
-    /// Opaque id reserved for Phase 3.2+ (e.g. `builtin:blur`). Not executed in 3.1.
+    /// Builtin id (Phase 3.4): `builtin:color_adjust`, `builtin:blur`,
+    /// `builtin:lut_contrast`, `builtin:lut_warm`.
     pub effect_id: String,
     #[serde(default = "default_effect_enabled")]
     pub enabled: bool,
@@ -313,6 +314,19 @@ pub struct EffectInstance {
 
 fn default_effect_enabled() -> bool {
     true
+}
+
+/// Outgoing transition at the end of a media clip (Phase 3.5). Video tracks only for now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClipTransition {
+    pub kind: TransitionKind,
+    pub duration_secs: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitionKind {
+    Crossfade,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -335,9 +349,12 @@ pub struct MediaClip {
     pub transform: ClipTransform,
     #[serde(default)]
     pub keyframes: Vec<KeyframeTrack>,
-    /// Effect slots (Phase 3.1 store-only; no render path yet).
+    /// Effect slots executed by the compositor (Phase 3.4 builtins).
     #[serde(default)]
     pub effects: Vec<EffectInstance>,
+    /// Transition into the next clip on the same track (Phase 3.5). Renderer-only overlap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outgoing_transition: Option<ClipTransition>,
 }
 
 impl Default for MediaClip {
@@ -355,6 +372,7 @@ impl Default for MediaClip {
             transform: ClipTransform::default(),
             keyframes: Vec::new(),
             effects: Vec::new(),
+            outgoing_transition: None,
         }
     }
 }

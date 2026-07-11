@@ -307,6 +307,28 @@ impl GfxState {
             view_formats: &[],
         });
 
+        // `write_texture` requires bytes_per_row to be a multiple of 256 when height > 1.
+        // Project sizes like 1080×1920 yield 4320 B/row (not aligned) — uploading tight
+        // rows caused progressive horizontal smear / tearing in the native preview.
+        let unpadded_bpr = width * 4;
+        let padded_bpr = wgpu::util::align_to(unpadded_bpr, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let padded_storage: Option<Vec<u8>> = if padded_bpr == unpadded_bpr {
+            None
+        } else {
+            let mut buf = vec![0u8; (padded_bpr * height) as usize];
+            for row in 0..height as usize {
+                let src = row * unpadded_bpr as usize;
+                let dst = row * padded_bpr as usize;
+                buf[dst..dst + unpadded_bpr as usize]
+                    .copy_from_slice(&pixels[src..src + unpadded_bpr as usize]);
+            }
+            Some(buf)
+        };
+        let upload_slice: &[u8] = match &padded_storage {
+            Some(buf) => buf.as_slice(),
+            None => &pixels[..expected],
+        };
+
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -314,10 +336,10 @@ impl GfxState {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &pixels[..expected],
+            upload_slice,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(width * 4),
+                bytes_per_row: Some(padded_bpr),
                 rows_per_image: Some(height),
             },
             wgpu::Extent3d {

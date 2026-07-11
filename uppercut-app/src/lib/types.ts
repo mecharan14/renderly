@@ -1,4 +1,4 @@
-// TS mirror of uppercut-core's project schema v2 (docs/project-schema.md). Keep in sync.
+// TS mirror of uppercut-core's project schema v3 (docs/project-schema.md). Keep in sync.
 
 export interface Project {
   schema_version: number;
@@ -16,6 +16,13 @@ export interface ClipTransform {
   scale_y: number;
   rotation_deg: number;
   opacity: number;
+}
+
+export type TransitionKind = "crossfade";
+
+export interface ClipTransition {
+  kind: TransitionKind;
+  duration_secs: number;
 }
 
 export type AnimProperty =
@@ -104,6 +111,7 @@ export interface MediaClip {
   transform?: ClipTransform;
   keyframes?: KeyframeTrack[];
   effects?: EffectInstance[];
+  outgoing_transition?: ClipTransition | null;
 }
 
 export interface CaptionClip {

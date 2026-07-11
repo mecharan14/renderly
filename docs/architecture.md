@@ -1,13 +1,11 @@
 # Architecture
 
-Status: **Phase 3.1 foundation landed.** Export drives FFmpeg subprocess decode/encode with an
+Status: **Phase 3.2–3.5 landed.** Export drives FFmpeg subprocess decode/encode with an
 offscreen wgpu compositor; the Tauri app adds a native wgpu preview surface on Windows, now
-backed by a persistent playback engine (see "Playback engine" below) instead of the Phase 2
-MVP's per-frame render path. Linked libav via `ffmpeg-the-third` replaces the subprocess
-bridge once vcpkg/FFMPEG_DIR is standard in dev/CI. Phase 3.1 adds schema v2 clip transform /
-keyframes / effect slots, compositor hooks for transform+opacity, and volume keyframe
-evaluation — real effect shaders, transitions, WASM plugin host, and asset packs follow in
-later 3.x milestones (see [PLAN.md](../PLAN.md)). Manual QA: [qa-checklist.md](qa-checklist.md).
+backed by a persistent playback engine (see "Playback engine" below). Phase 3 includes
+schema v3 clip transform / keyframes / builtin effects / outgoing crossfade transitions,
+preview transform handles (webview overlay), and a keyframe editor. WASM plugin host and
+asset packs follow later (see [PLAN.md](../PLAN.md)). Manual QA: [qa-checklist.md](qa-checklist.md).
 
 ## Crate graph
 
@@ -40,8 +38,9 @@ Owns:
   subprocesses (no link-time libav dependency); migrate to `ffmpeg-the-third` when dev/CI
   ships FFmpeg development libraries consistently.
 - **Compositing** — wgpu offscreen render graph (Phase 0: cover-fit scale/blit; Phase 3.1:
-  per-layer user translate/scale/rotate + opacity on top of cover UV). Full effects graph /
-  transitions / WASM plugins are later Phase 3 milestones.
+  per-layer user translate/scale/rotate + opacity; Phase 3.4: builtin effect chain —
+  color_adjust / separable blur / embedded lut_contrast+lut_warm; Phase 3.5: dual-layer
+  crossfade during `outgoing_transition`). WASM plugins / asset packs are later.
 - **Perception** — frame rendering to image, transcript (whisper-rs), scene/silence
   detection. These back the MCP perception tools and are engine functions, not MCP-specific
   code, so the CLI can expose them too.
