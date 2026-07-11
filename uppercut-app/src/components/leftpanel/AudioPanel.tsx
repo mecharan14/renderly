@@ -79,9 +79,18 @@ export function AudioPanel() {
         <button type="button" className="btn" onClick={() => void pickAndImportMedia()}>
           Import audio
         </button>
-        {items.length === 0 ? (
-          <p className="empty-hint">Imported audio and generated voiceovers appear here.</p>
-        ) : (
+      {items.length === 0 ? (
+        <div className="empty-state">
+          <div className="empty-state-icon">♪</div>
+          <p>
+            <strong>No audio yet</strong>
+          </p>
+          <p className="empty-hint">
+            Import music or SFX, or generate a voiceover above. Items appear here and can be
+            dragged onto an audio track.
+          </p>
+        </div>
+      ) : (
           items.map((item) => (
             <div
               key={item.id}

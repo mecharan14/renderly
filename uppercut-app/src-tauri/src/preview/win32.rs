@@ -168,11 +168,21 @@ impl GfxState {
             .map_err(|e| PreviewError::Wgpu(e.to_string()))?;
 
         let caps = surface.get_capabilities(&adapter);
+        // FFmpeg delivers display-referred 8-bit RGBA (already gamma-encoded). Blitting
+        // those bytes into an *sRGB* swapchain makes the GPU treat them as linear and
+        // re-encode → washed-out / oversaturated preview. Prefer a non-sRGB surface so
+        // the present path is a passthrough matching the export compositor (Rgba8Unorm).
         let format = caps
             .formats
             .iter()
             .copied()
-            .find(|f| f.is_srgb())
+            .find(|f| {
+                matches!(
+                    f,
+                    wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
+                )
+            })
+            .or_else(|| caps.formats.iter().copied().find(|f| !f.is_srgb()))
             .unwrap_or(caps.formats[0]);
 
         let config = wgpu::SurfaceConfiguration {
@@ -184,7 +194,9 @@ impl GfxState {
             desired_maximum_frame_latency: 2,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
-            color_space: wgpu::SurfaceColorSpace::Auto,
+            // Explicit SDR — Auto can still pick a wide-gamut path on some drivers and
+            // fight the non-sRGB Unorm surface choice above.
+            color_space: wgpu::SurfaceColorSpace::Srgb,
         };
         surface.configure(&device, &config);
 

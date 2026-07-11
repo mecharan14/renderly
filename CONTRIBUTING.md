@@ -1,8 +1,10 @@
 # Contributing to Uppercut
 
-Thanks for considering contributing. Uppercut is early (Phase 0/1 — see
-[PLAN.md](PLAN.md) §4) so the shape of things will change fast; check the current phase
-before starting large work.
+Thanks for considering contributing. Uppercut's Phase 2 GUI rebuild (M0–M7) is complete —
+see [PLAN.md](PLAN.md) §4 and [AGENTS.md](AGENTS.md) §4. Phase 3 (effects / WASM plugins)
+is next; check the current phase before starting large work.
+
+Before a release-minded PR, walk [docs/qa-checklist.md](docs/qa-checklist.md).
 
 ## Two ways to contribute, no Rust required for either
 

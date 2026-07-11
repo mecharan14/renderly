@@ -23,7 +23,11 @@ export function ProjectInspector() {
     return (
       <div className="inspector-empty">
         <div className="icon">✦</div>
-        <p>Select a clip on the timeline to edit its properties.</p>
+        <p>
+          <strong>No project open</strong>
+          <br />
+          Import a video or open a project to edit canvas settings and clip properties.
+        </p>
       </div>
     );
   }
@@ -47,6 +51,7 @@ export function ProjectInspector() {
         <p className="empty-hint">
           {project.media.length} media · {project.tracks.length} tracks
         </p>
+        <p className="empty-hint">Select a clip on the timeline for clip-specific properties.</p>
       </div>
 
       <div className="inspector-section">

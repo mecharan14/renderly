@@ -50,6 +50,13 @@ fn which_tool(name: &str) -> Option<PathBuf> {
     })
 }
 
+/// Keep ffmpeg's noisy-but-benign decoder chatter (e.g. H.264 `mmco: unref short failure`
+/// on keyframe seeks) off the inherited console. Callers that need stderr for parsing
+/// (silencedetect, etc.) must not use this — they should `.output()` / pipe instead.
+fn silence_stderr(cmd: &mut Command) {
+    cmd.stderr(Stdio::null());
+}
+
 pub fn ffmpeg_path() -> Result<PathBuf, FfmpegCliError> {
     resolve_tool("ffmpeg", &FFMPEG)
 }
@@ -307,33 +314,36 @@ pub fn generate_thumbnail_strip(
                         .max(0.0);
                     let ffmpeg = &ffmpeg;
                     s.spawn(move || {
-                        let status = Command::new(ffmpeg)
-                            .args([
-                                "-hide_banner",
-                                "-loglevel",
-                                "error",
-                                "-ss",
-                                &format!("{t:.3}"),
-                                "-i",
-                            ])
-                            .arg(path)
-                            .args([
-                                "-an",
-                                "-sn",
-                                "-frames:v",
-                                "1",
-                                "-vf",
-                                &format!("scale=-2:{height}:flags=fast_bilinear"),
-                                "-threads",
-                                "1",
-                                "-y",
-                            ])
-                            .arg(&frame_path)
-                            .status()
-                            .map_err(|e| FfmpegCliError::SpawnFailed {
-                                tool: "ffmpeg",
-                                message: e.to_string(),
-                            })?;
+                        // Keyframe seeks into H.264 often emit `mmco: unref short failure`
+                        // at loglevel=error even when the extracted frame is fine — silence
+                        // stderr so import doesn't spam the app console.
+                        let mut cmd = Command::new(ffmpeg);
+                        cmd.args([
+                            "-hide_banner",
+                            "-loglevel",
+                            "fatal",
+                            "-ss",
+                            &format!("{t:.3}"),
+                            "-i",
+                        ])
+                        .arg(path)
+                        .args([
+                            "-an",
+                            "-sn",
+                            "-frames:v",
+                            "1",
+                            "-vf",
+                            &format!("scale=-2:{height}:flags=fast_bilinear"),
+                            "-threads",
+                            "1",
+                            "-y",
+                        ])
+                        .arg(&frame_path);
+                        silence_stderr(&mut cmd);
+                        let status = cmd.status().map_err(|e| FfmpegCliError::SpawnFailed {
+                            tool: "ffmpeg",
+                            message: e.to_string(),
+                        })?;
                         if !status.success() {
                             return Err(FfmpegCliError::NonZeroExit(status.code().unwrap_or(-1)));
                         }
@@ -360,11 +370,12 @@ pub fn generate_thumbnail_strip(
     }
 
     // Assemble the grid from the numbered frame sequence.
-    let status = Command::new(&ffmpeg)
+    let mut tile_cmd = Command::new(&ffmpeg);
+    tile_cmd
         .args([
             "-hide_banner",
             "-loglevel",
-            "error",
+            "fatal",
             "-y",
             "-framerate",
             "1",
@@ -378,12 +389,12 @@ pub fn generate_thumbnail_strip(
             &format!("tile={cols}x{rows}"),
             "-an",
         ])
-        .arg(out_path)
-        .status()
-        .map_err(|e| FfmpegCliError::SpawnFailed {
-            tool: "ffmpeg",
-            message: e.to_string(),
-        })?;
+        .arg(out_path);
+    silence_stderr(&mut tile_cmd);
+    let status = tile_cmd.status().map_err(|e| FfmpegCliError::SpawnFailed {
+        tool: "ffmpeg",
+        message: e.to_string(),
+    })?;
 
     let _ = std::fs::remove_dir_all(&tmp);
 
@@ -428,8 +439,12 @@ impl VideoReader {
         let mut cmd = Command::new(ffmpeg_path()?);
         cmd.args([
             "-hide_banner",
+            // `error` still prints H.264 `mmco: unref short failure` on many game
+            // captures after a keyframe seek — those are benign. `fatal` keeps real
+            // process failures while stderr is drained to avoid console spam / pipe
+            // deadlock (see `drain_stderr`).
             "-loglevel",
-            "error",
+            "fatal",
             "-ss",
             &format!("{start_secs:.6}"),
             "-i",
@@ -438,10 +453,21 @@ impl VideoReader {
         if let Some(fps) = opts.output_fps {
             cmd.args(["-r", &format!("{fps:.6}")]);
         }
-        if width != probed.width || height != probed.height {
-            cmd.args(["-vf", &format!("scale=-2:{height}")]);
-        }
-        cmd.args(["-an", "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
+        // Always run through `scale` so swscale applies an explicit BT.709 limited→full
+        // RGB conversion. Auto matrix/range often mis-guesses gameplay captures and
+        // yields flat, washed, or oversaturated colours relative to desktop players.
+        let scale = if width != probed.width || height != probed.height {
+            format!("scale=-2:{height}")
+        } else {
+            format!("scale={width}:{height}")
+        };
+        let vf = format!(
+            "{scale}:flags=bicubic+accurate_rnd+full_chroma_int:\
+             in_color_matrix=bt709:out_color_matrix=bt709:\
+             in_range=tv:out_range=pc,format=rgba"
+        );
+        cmd.args(["-vf", &vf])
+            .args(["-an", "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -532,6 +558,17 @@ impl VideoEncoder {
                 "libx264",
                 "-pix_fmt",
                 "yuv420p",
+                // Tag the bitstream so players treat it as BT.709 limited (matches the
+                // decode path's explicit matrix/range). Without this, some players guess
+                // BT.601 and the export looks differently saturated than the preview.
+                "-colorspace",
+                "bt709",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+                "-color_range",
+                "tv",
                 "-movflags",
                 "+faststart",
             ])

@@ -86,10 +86,13 @@ Before considering a change complete:
 
 ## 4. Current phase
 
-Check PLAN.md §4 for the phase roadmap. **Phase 2 is complete:** Tauri 2 GUI MVP with media bin,
-canvas timeline (drag, trim, split, razor, snap, zoom), native wgpu preview (Windows),
-transport with audio scrub, caption inspector, and export dialog. Phase 3 (effects, WASM
-plugins) is next.
+Check PLAN.md §4 for the phase roadmap. **Phase 2 GUI rebuild (M0–M7) is complete:** Tauri 2
+app with React + Zustand chrome, PlaybackEngine (async, no main-thread freeze), schema v1
+track flags + undo/redo, canvas timeline (drag/trim/split/razor/snap/zoom), media
+thumbnails/waveforms, transport/aspect/inspectors, export with progress + cancel, and M7
+polish (empty states, skeletons, focus/scrollbars, QA checklist in
+[docs/qa-checklist.md](docs/qa-checklist.md)). **Phase 3 (effects, WASM plugins, asset
+packs) is next.**
 
 ## 5. When in doubt
 

@@ -355,13 +355,15 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       get().toast("Create or open a project first.", "error");
       return false;
     }
+    // CapCut-style: pause before mutating so decoders/audio don't race the edit.
+    if (get().playing) get().stopPlayback();
     try {
       await ipc.applyCommand(command);
       await get().refetchProject();
       await ipc.seek(get().playhead).catch(() => {});
       return true;
     } catch (e) {
-      if (!quiet) get().toast(`Edit failed: ${errMsg(e)}`, "error");
+      if (!quiet) get().toast(formatCommandError(e), "error");
       // The backend rejected the command, so `store.project` may still be holding an
       // optimistic local mutation (e.g. a timeline drag preview) that was never actually
       // applied — resync from the real backend state instead of leaving that phantom
@@ -376,19 +378,21 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       get().toast("Create or open a project first.", "error");
       return false;
     }
+    if (get().playing) get().stopPlayback();
     try {
       await ipc.applyCommands(commands);
       await get().refetchProject();
       await ipc.seek(get().playhead).catch(() => {});
       return true;
     } catch (e) {
-      if (!quiet) get().toast(`Edit failed: ${errMsg(e)}`, "error");
+      if (!quiet) get().toast(formatCommandError(e), "error");
       await get().refetchProject();
       return false;
     }
   },
 
   async undo() {
+    if (get().playing) get().stopPlayback();
     try {
       const status = await ipc.undo();
       set({ canUndo: status.can_undo, canRedo: status.can_redo });
@@ -396,11 +400,12 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       get().pruneStaleSelection();
       await ipc.seek(get().playhead).catch(() => {});
     } catch (e) {
-      console.warn("undo:", e);
+      get().toast(formatCommandError(e, "Undo failed"), "error");
     }
   },
 
   async redo() {
+    if (get().playing) get().stopPlayback();
     try {
       const status = await ipc.redo();
       set({ canUndo: status.can_undo, canRedo: status.can_redo });
@@ -408,7 +413,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       get().pruneStaleSelection();
       await ipc.seek(get().playhead).catch(() => {});
     } catch (e) {
-      console.warn("redo:", e);
+      get().toast(formatCommandError(e, "Redo failed"), "error");
     }
   },
 
@@ -534,8 +539,8 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     try {
       await ipc.play(get().playhead);
     } catch (e) {
-      console.warn("playback:", e);
       set({ playing: false });
+      get().toast(formatCommandError(e, "Playback failed"), "error");
     }
   },
 
@@ -553,7 +558,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     try {
       await ipc.seek(clamped);
     } catch (e) {
-      console.warn("seek:", e);
+      get().toast(formatCommandError(e, "Seek failed"), "error");
     }
   },
 
@@ -572,7 +577,23 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 }));
 
 function errMsg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
+}
+
+/// Surfaces the backend `CommandError` / Tauri error string without a redundant
+/// "Edit failed:" prefix when the message is already self-describing.
+function formatCommandError(e: unknown, fallbackPrefix = "Edit failed"): string {
+  const msg = errMsg(e).trim();
+  if (!msg) return fallbackPrefix;
+  // Tauri often wraps as `commandname failed: …` or plain Display from thiserror.
+  if (/failed|error|reject|invalid|not found|overlap|mismatch/i.test(msg)) return msg;
+  return `${fallbackPrefix}: ${msg}`;
 }
 
 function basename(path: string): string {
@@ -591,6 +612,9 @@ function pasteCommand(clip: Clip, trackId: string, positionSecs: number): Record
 export function connectStoreToBackendEvents(): () => void {
   const unsubTick = ipc.onPlaybackTick((p) => useEditorStore.getState().onPlaybackTick(p));
   const unsubState = ipc.onPlaybackState((p) => useEditorStore.getState().onPlaybackState(p));
+  const unsubPlayErr = ipc.onPlaybackError((p) => {
+    useEditorStore.getState().toast(p.message, "error");
+  });
   const unsubChanged = ipc.onProjectChanged((p) => {
     useEditorStore.setState({ canUndo: p.can_undo, canRedo: p.can_redo });
     // Skip the refetch while a timeline drag is in progress — see `isDragging`'s doc
@@ -603,6 +627,7 @@ export function connectStoreToBackendEvents(): () => void {
   return () => {
     unsubTick();
     unsubState();
+    unsubPlayErr();
     unsubChanged();
     unsubThumbs();
     unsubWaveform();

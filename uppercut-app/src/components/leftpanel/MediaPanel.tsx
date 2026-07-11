@@ -72,12 +72,20 @@ export function MediaPanel() {
       </div>
 
       {items.length === 0 ? (
-        <p className="empty-hint">
-          Imported files appear here. Each one is added to the timeline automatically.
-        </p>
+        <div className="empty-state">
+          <div className="empty-state-icon">🎬</div>
+          <p>
+            <strong>No media yet</strong>
+          </p>
+          <p className="empty-hint">
+            Drop a video above or click the drop zone. Each import is added to the timeline
+            automatically.
+          </p>
+        </div>
       ) : (
         items.map((item) => {
           const thumb = mediaAssets[item.id]?.thumbnails;
+          const pendingThumb = item.kind === "video" && !thumb;
           return (
             <div
               key={item.id}
@@ -88,6 +96,8 @@ export function MediaPanel() {
             >
               {thumb && thumb.image ? (
                 <FilmstripThumb thumb={thumb} durationSecs={item.duration_secs ?? 0} />
+              ) : pendingThumb ? (
+                <div className="media-thumb skeleton" aria-label="Generating thumbnails" />
               ) : (
                 <div className={`media-thumb ${item.kind}`}>{item.kind === "image" ? "🖼" : "▶"}</div>
               )}
@@ -95,6 +105,7 @@ export function MediaPanel() {
                 <div className="name">{fileName(item.path)}</div>
                 <div className="sub">
                   {item.kind} · {item.duration_secs?.toFixed(1) ?? "?"}s
+                  {pendingThumb ? " · generating…" : ""}
                 </div>
               </div>
               <span className="media-add-hint">+ timeline</span>

@@ -28,6 +28,10 @@ export interface PlaybackStatePayload {
   time_secs: number;
 }
 
+export interface PlaybackErrorPayload {
+  message: string;
+}
+
 export interface DragDropPayload {
   paths?: string[];
 }
@@ -176,6 +180,11 @@ export function onPlaybackTick(cb: (payload: PlaybackTickPayload) => void): () =
 
 export function onPlaybackState(cb: (payload: PlaybackStatePayload) => void): () => void {
   const unlisten = listen<PlaybackStatePayload>("playback:state", (e) => cb(e.payload));
+  return () => void unlisten.then((f) => f());
+}
+
+export function onPlaybackError(cb: (payload: PlaybackErrorPayload) => void): () => void {
+  const unlisten = listen<PlaybackErrorPayload>("playback:error", (e) => cb(e.payload));
   return () => void unlisten.then((f) => f());
 }
 

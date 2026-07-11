@@ -42,6 +42,11 @@ pub struct PlaybackStateEvent {
     pub time_secs: f64,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlaybackErrorEvent {
+    pub message: String,
+}
+
 const TICK_INTERVAL: Duration = Duration::from_millis(33);
 
 struct PlaySession {
@@ -284,6 +289,12 @@ fn run_playback_loop(
                     time_secs: start_secs,
                 },
             );
+            let _ = app.emit(
+                "playback:error",
+                PlaybackErrorEvent {
+                    message: format!("Could not start playback: {e}"),
+                },
+            );
             return;
         }
     };
@@ -354,6 +365,7 @@ fn run_playback_loop(
 
         let wall_clock_start = Instant::now();
         let mut last_tick_emit = Instant::now() - TICK_INTERVAL;
+        let mut last_error_emit = Instant::now() - Duration::from_secs(2);
         let frame_period = Duration::from_secs_f64(1.0 / settings.fps);
 
         loop {
@@ -417,9 +429,29 @@ fn run_playback_loop(
                             .present_rgba(&pixels, settings.width, settings.height);
                     if let Err(e) = result {
                         eprintln!("playback: present failed at {t:.3}s: {e}");
+                        if last_error_emit.elapsed() >= Duration::from_secs(2) {
+                            let _ = app.emit(
+                                "playback:error",
+                                PlaybackErrorEvent {
+                                    message: format!("Preview present failed: {e}"),
+                                },
+                            );
+                            last_error_emit = Instant::now();
+                        }
                     }
                 }
-                Err(e) => eprintln!("playback: render failed at {t:.3}s: {e}"),
+                Err(e) => {
+                    eprintln!("playback: render failed at {t:.3}s: {e}");
+                    if last_error_emit.elapsed() >= Duration::from_secs(2) {
+                        let _ = app.emit(
+                            "playback:error",
+                            PlaybackErrorEvent {
+                                message: format!("Playback render failed: {e}"),
+                            },
+                        );
+                        last_error_emit = Instant::now();
+                    }
+                }
             }
 
             if last_tick_emit.elapsed() >= TICK_INTERVAL {

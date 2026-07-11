@@ -2,6 +2,44 @@
 
 * {
   box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+/* Keyboard focus — visible rings without fighting mouse clicks. */
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button:focus-visible,
+.tool-btn:focus-visible,
+.tab-rail-btn:focus-visible,
+.preset-card:focus-visible {
+  outline-offset: 1px;
+}
+
+/* Thin scrollbars that match the dark chrome. */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--text-3);
 }
 
 html,
@@ -393,6 +431,26 @@ body {
   background-color: var(--clip-video-bg);
 }
 
+.media-thumb.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--bg-3) 0%,
+    var(--bg-2) 45%,
+    var(--bg-3) 90%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.1s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
 .media-meta {
   min-width: 0;
   flex: 1;
@@ -741,6 +799,26 @@ body {
   position: relative;
   flex: 1;
   min-height: 0;
+}
+
+.timeline-empty {
+  position: absolute;
+  left: calc(var(--track-label-w) + 24px);
+  right: 24px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 4;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  color: var(--text-3);
+  font-size: 0.85rem;
+}
+
+.timeline-empty strong {
+  color: var(--text-2);
+  font-size: 0.95rem;
 }
 
 #timeline {
@@ -1126,6 +1204,80 @@ dialog menu {
   color: var(--text-3);
   font-size: 0.8rem;
   line-height: 1.5;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 1.5rem 0.75rem;
+  color: var(--text-3);
+}
+
+.empty-state-icon {
+  font-size: 1.75rem;
+  opacity: 0.35;
+  margin-bottom: var(--space-2);
+}
+
+.empty-state .empty-hint {
+  padding: 0.35rem 0 0;
+}
+
+.coming-soon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+}
+
+.coming-soon-card {
+  text-align: center;
+  max-width: 220px;
+  padding: 1.25rem 0.75rem;
+}
+
+.coming-soon-icon {
+  width: 48px;
+  height: 48px;
+  margin: 0 auto var(--space-3);
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-l);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 1.35rem;
+}
+
+.coming-soon-card h3 {
+  margin: 0 0 var(--space-2);
+  font-size: 0.95rem;
+  color: var(--text-1);
+}
+
+.coming-soon-pitch {
+  margin: 0 0 var(--space-3);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+.coming-soon-badge {
+  display: inline-block;
+  margin: 0 0 var(--space-3);
+  padding: 0.2rem 0.55rem;
+  border-radius: var(--radius-s);
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  color: var(--accent);
+  font-size: var(--fs-11);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.coming-soon-note {
+  margin: 0;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: var(--text-3);
 }
 
 .track-menu {
