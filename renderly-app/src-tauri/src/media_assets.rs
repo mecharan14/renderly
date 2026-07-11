@@ -7,14 +7,14 @@
 //! delivered to the frontend via `media:thumbnails-ready` / `media:waveform-ready` events
 //! (or synchronously via `get_media_assets` if a cache entry already exists).
 
+use renderly_core::project::MediaKind;
+use renderly_core::{audio_peaks, generate_thumbnail_strip};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tauri::{AppHandle, Emitter, Manager};
-use renderly_core::project::MediaKind;
-use renderly_core::{audio_peaks, generate_thumbnail_strip};
 
 const MAX_TILES: u32 = 24;
 const TILE_HEIGHT: u32 = 72;

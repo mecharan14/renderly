@@ -1,5 +1,10 @@
 //! MCP tool handlers for Renderly — every edit dispatches through `renderly_core::apply_command`.
 
+use renderly_core::{
+    apply_command, audio_peaks as analyze_audio_peaks, commands::ExportPreset,
+    detect_scenes as analyze_scenes, detect_silence as analyze_silence, export_project, media,
+    perceive, project::Project, transcribe_media, Command,
+};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
@@ -7,11 +12,6 @@ use rmcp::{
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use renderly_core::{
-    apply_command, audio_peaks as analyze_audio_peaks, commands::ExportPreset,
-    detect_scenes as analyze_scenes, detect_silence as analyze_silence, export_project, media,
-    perceive, project::Project, transcribe_media, Command,
-};
 
 #[derive(Debug)]
 pub struct RenderlyMcp {

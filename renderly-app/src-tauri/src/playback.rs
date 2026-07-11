@@ -13,6 +13,10 @@
 //! calls, rebuilding only when output settings actually change.
 
 use parking_lot::Mutex;
+use renderly_core::{
+    mix_timeline_audio_range_to_file, mix_timeline_audio_segment, timeline_duration, DecodeOptions,
+    ExportSettings, FrameRenderer, Project,
+};
 use rodio::{Decoder, OutputStreamBuilder, Sink};
 use std::fs::File;
 use std::io::{BufReader, Cursor};
@@ -23,10 +27,6 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
-use renderly_core::{
-    mix_timeline_audio_range_to_file, mix_timeline_audio_segment, timeline_duration, DecodeOptions,
-    ExportSettings, FrameRenderer, Project,
-};
 
 /// Emitted ~30 Hz while playing, and once on seek/pause/EOF.
 #[derive(Debug, Clone, serde::Serialize)]

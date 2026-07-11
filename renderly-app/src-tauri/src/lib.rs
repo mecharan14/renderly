@@ -5,12 +5,6 @@ mod preview;
 use parking_lot::Mutex;
 use playback::PlaybackEngine;
 use preview::{NativeWindow, PreviewBounds, PreviewPanel};
-use serde::Serialize;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager, State};
 use renderly_core::{
     apply_command as apply_core_command,
     commands::ExportPreset,
@@ -18,6 +12,12 @@ use renderly_core::{
     project::{ClipMask, ClipTransform, Project},
     Command, CommandOutcome, ExportError, ExportPhase, ExportProgress,
 };
+use serde::Serialize;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 struct Session {
     path: PathBuf,
