@@ -1,7 +1,9 @@
 //! Offscreen wgpu compositor for Phase 0 export. Decoded frames are uploaded as textures,
 //! scaled to the output resolution, and read back as RGBA for the FFmpeg encoder.
+//! Phase 3.1 adds per-layer user transform (translate / scale / rotate) and opacity.
 
 use crate::media::RgbaFrame;
+use crate::project::ClipTransform;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
@@ -13,20 +15,39 @@ pub enum ComposeError {
     Wgpu(String),
 }
 
-/// Matches the `LayerTransform` uniform struct in composite.wgsl: two tightly-packed
-/// `vec2<f32>` fields (scale, then offset), 16 bytes total, no padding.
+/// One composited layer: decoded (or caption) RGBA plus evaluated transform at frame time.
+pub struct ComposeLayer {
+    pub frame: RgbaFrame,
+    pub transform: ClipTransform,
+}
+
+impl From<RgbaFrame> for ComposeLayer {
+    fn from(frame: RgbaFrame) -> Self {
+        Self {
+            frame,
+            transform: ClipTransform::default(),
+        }
+    }
+}
+
+/// Matches `LayerParams` in composite.wgsl (48 bytes, 16-byte aligned).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct LayerTransformUniform {
-    scale: [f32; 2],
-    offset: [f32; 2],
+struct LayerParamsUniform {
+    cover_scale: [f32; 2],
+    cover_offset: [f32; 2],
+    user_translate: [f32; 2],
+    user_scale: [f32; 2],
+    rotation_rad: f32,
+    opacity: f32,
+    _pad: [f32; 2],
 }
 
 /// "Cover" fit: scale/offset (in source-texture UV space) that fill the output rect
 /// without distorting the layer's aspect ratio, cropping whichever axis overflows.
 /// Identity when the layer already matches the output aspect ratio (e.g. caption layers,
 /// which are already rendered at the output resolution).
-fn cover_transform(layer_w: u32, layer_h: u32, out_w: u32, out_h: u32) -> LayerTransformUniform {
+fn cover_uv(layer_w: u32, layer_h: u32, out_w: u32, out_h: u32) -> ([f32; 2], [f32; 2]) {
     let layer_aspect = layer_w as f32 / layer_h as f32;
     let out_aspect = out_w as f32 / out_h as f32;
     let (scale_x, scale_y) = if layer_aspect > out_aspect {
@@ -36,9 +57,29 @@ fn cover_transform(layer_w: u32, layer_h: u32, out_w: u32, out_h: u32) -> LayerT
         // Layer is relatively taller (or equal) than the output: crop top/bottom.
         (1.0, layer_aspect / out_aspect)
     };
-    LayerTransformUniform {
-        scale: [scale_x, scale_y],
-        offset: [(1.0 - scale_x) / 2.0, (1.0 - scale_y) / 2.0],
+    (
+        [scale_x, scale_y],
+        [(1.0 - scale_x) / 2.0, (1.0 - scale_y) / 2.0],
+    )
+}
+
+fn layer_params(
+    layer_w: u32,
+    layer_h: u32,
+    out_w: u32,
+    out_h: u32,
+    transform: &ClipTransform,
+) -> LayerParamsUniform {
+    let (cover_scale, cover_offset) = cover_uv(layer_w, layer_h, out_w, out_h);
+    let t = transform.clamp_opacity();
+    LayerParamsUniform {
+        cover_scale,
+        cover_offset,
+        user_translate: [t.x as f32, t.y as f32],
+        user_scale: [t.scale_x as f32, t.scale_y as f32],
+        rotation_rad: (t.rotation_deg as f32).to_radians(),
+        opacity: t.opacity as f32,
+        _pad: [0.0, 0.0],
     }
 }
 
@@ -144,7 +185,7 @@ impl Compositor {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -207,7 +248,7 @@ impl Compositor {
     }
 
     /// Composite layers in order (first = bottom). Empty → solid black frame.
-    pub fn composite(&mut self, layers: &[RgbaFrame]) -> Result<Vec<u8>, ComposeError> {
+    pub fn composite(&mut self, layers: &[ComposeLayer]) -> Result<Vec<u8>, ComposeError> {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -240,13 +281,14 @@ impl Compositor {
             pass.set_pipeline(&self.pipeline);
 
             for layer in layers {
+                let frame = &layer.frame;
                 let texture = self.device.create_texture_with_data(
                     &self.queue,
                     &wgpu::TextureDescriptor {
                         label: Some("layer"),
                         size: wgpu::Extent3d {
-                            width: layer.width,
-                            height: layer.height,
+                            width: frame.width,
+                            height: frame.height,
                             depth_or_array_layers: 1,
                         },
                         mip_level_count: 1,
@@ -257,7 +299,7 @@ impl Compositor {
                         view_formats: &[],
                     },
                     wgpu::util::TextureDataOrder::LayerMajor,
-                    &layer.pixels,
+                    &frame.pixels,
                 );
                 let view = texture.create_view(&Default::default());
 
@@ -267,12 +309,18 @@ impl Compositor {
                 // calls made while recording — before the encoder is submitted — would all
                 // land before any of this pass's draws execute on the GPU, leaving a
                 // shared buffer holding only the last layer's value for every draw.
-                let transform = cover_transform(layer.width, layer.height, self.width, self.height);
-                let transform_buffer =
+                let params = layer_params(
+                    frame.width,
+                    frame.height,
+                    self.width,
+                    self.height,
+                    &layer.transform,
+                );
+                let params_buffer =
                     self.device
                         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("layer-transform"),
-                            contents: bytemuck::bytes_of(&transform),
+                            label: Some("layer-params"),
+                            contents: bytemuck::bytes_of(&params),
                             usage: wgpu::BufferUsages::UNIFORM,
                         });
 
@@ -290,13 +338,13 @@ impl Compositor {
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: transform_buffer.as_entire_binding(),
+                            resource: params_buffer.as_entire_binding(),
                         },
                     ],
                 });
 
                 pass.set_bind_group(0, &bind_group, &[]);
-                pass.draw(0..3, 0..1);
+                pass.draw(0..6, 0..1);
             }
         }
 
@@ -366,44 +414,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cover_transform_is_identity_for_matching_aspect_ratio() {
-        let t = cover_transform(1080, 1920, 1080, 1920);
-        assert!((t.scale[0] - 1.0).abs() < 1e-6);
-        assert!((t.scale[1] - 1.0).abs() < 1e-6);
-        assert!((t.offset[0] - 0.0).abs() < 1e-6);
-        assert!((t.offset[1] - 0.0).abs() < 1e-6);
+    fn cover_uv_is_identity_for_matching_aspect_ratio() {
+        let (scale, offset) = cover_uv(1080, 1920, 1080, 1920);
+        assert!((scale[0] - 1.0).abs() < 1e-6);
+        assert!((scale[1] - 1.0).abs() < 1e-6);
+        assert!((offset[0] - 0.0).abs() < 1e-6);
+        assert!((offset[1] - 0.0).abs() < 1e-6);
     }
 
     #[test]
-    fn cover_transform_crops_sides_for_wider_landscape_source_into_vertical_output() {
+    fn cover_uv_crops_sides_for_wider_landscape_source_into_vertical_output() {
         // 16:9 gameplay footage into a 9:16 TikTok export: the source is relatively wider
         // than the output, so covering it means cropping the left/right edges (scale_x < 1)
         // while using the full height (scale_y == 1) — never stretching either axis.
-        let t = cover_transform(1920, 1080, 1080, 1920);
-        assert!(t.scale[0] < 1.0, "expected horizontal crop, got {t:?}");
+        let (scale, offset) = cover_uv(1920, 1080, 1080, 1920);
         assert!(
-            (t.scale[1] - 1.0).abs() < 1e-6,
-            "expected full height, got {t:?}"
+            scale[0] < 1.0,
+            "expected horizontal crop, got scale={scale:?}"
         );
         assert!(
-            (t.offset[0] - (1.0 - t.scale[0]) / 2.0).abs() < 1e-6,
+            (scale[1] - 1.0).abs() < 1e-6,
+            "expected full height, got scale={scale:?}"
+        );
+        assert!(
+            (offset[0] - (1.0 - scale[0]) / 2.0).abs() < 1e-6,
             "crop should be centered"
         );
-        assert!((t.offset[1] - 0.0).abs() < 1e-6);
+        assert!((offset[1] - 0.0).abs() < 1e-6);
     }
 
     #[test]
-    fn cover_transform_crops_top_bottom_for_taller_source_into_landscape_output() {
-        let t = cover_transform(1080, 1920, 1920, 1080);
+    fn cover_uv_crops_top_bottom_for_taller_source_into_landscape_output() {
+        let (scale, offset) = cover_uv(1080, 1920, 1920, 1080);
         assert!(
-            (t.scale[0] - 1.0).abs() < 1e-6,
-            "expected full width, got {t:?}"
+            (scale[0] - 1.0).abs() < 1e-6,
+            "expected full width, got scale={scale:?}"
         );
-        assert!(t.scale[1] < 1.0, "expected vertical crop, got {t:?}");
-        assert!((t.offset[0] - 0.0).abs() < 1e-6);
         assert!(
-            (t.offset[1] - (1.0 - t.scale[1]) / 2.0).abs() < 1e-6,
+            scale[1] < 1.0,
+            "expected vertical crop, got scale={scale:?}"
+        );
+        assert!((offset[0] - 0.0).abs() < 1e-6);
+        assert!(
+            (offset[1] - (1.0 - scale[1]) / 2.0).abs() < 1e-6,
             "crop should be centered"
         );
+    }
+
+    #[test]
+    fn identity_transform_params_match_cover_only() {
+        let params = layer_params(1920, 1080, 1080, 1920, &ClipTransform::default());
+        let (scale, offset) = cover_uv(1920, 1080, 1080, 1920);
+        assert_eq!(params.cover_scale, scale);
+        assert_eq!(params.cover_offset, offset);
+        assert_eq!(params.user_translate, [0.0, 0.0]);
+        assert_eq!(params.user_scale, [1.0, 1.0]);
+        assert!((params.rotation_rad).abs() < 1e-6);
+        assert!((params.opacity - 1.0).abs() < 1e-6);
     }
 }

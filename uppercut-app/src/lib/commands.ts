@@ -2,7 +2,7 @@
 // Each returns a plain JSON object matching the `#[serde(tag = "command", rename_all =
 // "PascalCase")]` wire shape, ready to pass to `ipc.applyCommand`.
 
-import type { TrackAudioRole, TrackKind } from "./types";
+import type { ClipTransform, EffectInstance, KeyframeTrack, TrackAudioRole, TrackKind } from "./types";
 
 export function importMedia(path: string) {
   return { command: "ImportMedia", path };
@@ -164,6 +164,18 @@ export function deleteTrack(trackId: string) {
 
 export function setClipEnabled(trackId: string, clipId: string, enabled: boolean) {
   return { command: "SetClipEnabled", track_id: trackId, clip_id: clipId, enabled };
+}
+
+export function setClipTransform(trackId: string, clipId: string, transform: ClipTransform) {
+  return { command: "SetClipTransform", track_id: trackId, clip_id: clipId, transform };
+}
+
+export function setClipKeyframes(trackId: string, clipId: string, keyframes: KeyframeTrack[]) {
+  return { command: "SetClipKeyframes", track_id: trackId, clip_id: clipId, keyframes };
+}
+
+export function setClipEffects(trackId: string, clipId: string, effects: EffectInstance[]) {
+  return { command: "SetClipEffects", track_id: trackId, clip_id: clipId, effects };
 }
 
 export function generateCaptions(

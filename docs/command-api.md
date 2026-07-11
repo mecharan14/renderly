@@ -1,6 +1,6 @@
 # Command API
 
-Status: **current** (matches project schema v1). This is the source of truth for the `Command` enum and
+Status: **current** (matches project schema v2). This is the source of truth for the `Command` enum and
 `apply_command` in `uppercut-core`. GUI, CLI, and MCP must all dispatch through this exact
 set (see AGENTS.md §0.1) — none of them may mutate `Project` state any other way.
 
@@ -27,6 +27,9 @@ pub enum Command {
     RenameTrack { track_id: Id, name: String },
     DeleteTrack { track_id: Id },
     SetClipEnabled { track_id: Id, clip_id: Id, enabled: bool },
+    SetClipTransform { track_id: Id, clip_id: Id, transform: ClipTransform },
+    SetClipKeyframes { track_id: Id, clip_id: Id, keyframes: Vec<KeyframeTrack> },
+    SetClipEffects { track_id: Id, clip_id: Id, effects: Vec<EffectInstance> },
     Export { output_path: String, preset: ExportPreset },
 }
 
@@ -78,7 +81,9 @@ the media.
 ### `SplitClip`
 Splits the clip at timeline position `at_secs` into two clips with adjusted
 `source_in_secs`/`source_out_secs`, both keeping the same `media_id`. New clip on the right
-gets a fresh id; the left retains the original id.
+gets a fresh id; the left retains the original id. Media clips copy `transform`; keyframes
+are split at the cut (left keeps `t < split`, right remaps `t' = t - split`); effects are
+copied with new instance ids on the right clip.
 
 - Errors: `at_secs` not strictly inside the clip's timeline span.
 
@@ -195,10 +200,29 @@ existing `enabled` field on those clip types, now settable directly instead of o
 
 - Errors: track/clip not found, or the clip is a `CaptionClip` (no `enabled` field).
 
+### `SetClipTransform` (Phase 3.1)
+Replaces the static `transform` on a media clip (video or audio). Finite numbers only;
+`opacity` is clamped to `0..=1`.
+
+- Errors: track/clip not found, not a media clip, or non-finite transform fields.
+
+### `SetClipKeyframes` (Phase 3.1)
+Replaces all keyframe tracks on a media clip. Validates unique properties, non-negative
+finite times, finite values, opacity keys in `0..=1`; sorts keys by time on write.
+
+- Errors: track/clip not found, not a media clip, or invalid keyframe data.
+
+### `SetClipEffects` (Phase 3.1)
+Replaces the effect-instance list on a media clip. Store-only in 3.1 (no render path).
+Validates unique instance ids, non-empty `effect_id`, finite params.
+
+- Errors: track/clip not found, not a media clip, or invalid effect list.
+
 ### `Export`
 Renders the current `Project` timeline to `output_path` using `preset` (e.g.
 `TikTok9x16`, `Youtube16x9`, or a `Custom { width, height, fps }` variant). Muxes mixed
-audio (with fades and optional music ducking) and burns caption clips.
+audio (with fades and optional music ducking) and burns caption clips. Video layers honor
+evaluated transform+opacity; audio mix uses evaluated volume (including Volume keyframes).
 
 `Export` does not mutate `Project`. Progress / cancel for interactive clients go through
 `uppercut_core::export::export_project_with_progress` (GUI Tauri command + CLI status
@@ -220,12 +244,12 @@ removes both the track and the clip together instead of leaving an empty track b
 of `uppercut-core`'s public API — CLI and MCP keep calling `apply_command` once per
 command, which is sufficient for scripted/agent use.
 
-## Non-goals for v0
+## Non-goals for later Phase 3
 
-No effect/transition/keyframe commands, no plugin invocation commands, no multi-cam
-commands — these arrive with their respective schema additions in later phases
-(see [project-schema.md](project-schema.md) "What's intentionally not in v0"). Do not add
-a command for a feature that has no schema representation yet.
+Preview transform handles, effect shaders / LUT / blur execution, transitions, WASM plugin
+invocation, and asset-pack commands are later milestones — see
+[project-schema.md](project-schema.md) "What's intentionally not in v2 yet". Do not add a
+command for a feature that has no schema representation yet.
 
 ## Version history
 
@@ -238,3 +262,5 @@ a command for a feature that has no schema representation yet.
   still generates one when omitted); added the Tauri-layer `apply_commands` batch API.
 - **GUI rebuild M6** (non-breaking): `export_project_with_progress` + `ExportError::Cancelled`
   for cooperative cancel; GUI emits `export:progress` (~10 Hz) and exposes `cancel_export`.
+- **Phase 3.1** (project schema v2): added `SetClipTransform`, `SetClipKeyframes`,
+  `SetClipEffects`; `SplitClip` inherits transform / splits keyframes / remints effect ids.

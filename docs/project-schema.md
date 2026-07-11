@@ -1,4 +1,4 @@
-# Project schema — v1
+# Project schema — v2
 
 Status: **current**. This is the source of truth for `uppercut-core`'s project
 model. Implementation types in `uppercut-core/src/project/` must match this document; if
@@ -12,7 +12,7 @@ extension `.uppercut.json`.
 
 ```jsonc
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "b3f1c2a0-...-uuid",
   "name": "ultra-bruno-ep12",
   "settings": {
@@ -29,7 +29,7 @@ extension `.uppercut.json`.
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | u32 | `1` for this spec. Loaders must reject unknown newer versions rather than guess. |
+| `schema_version` | u32 | `2` for this spec. Loaders accept `1` and `2` (`MIN_LOADABLE_SCHEMA_VERSION = 1`); reject unknown newer versions rather than guess. Saves always write `2`. |
 | `id` | string (UUIDv4) | Stable project identity, generated on creation. |
 | `name` | string | Human-facing project name; not used for file paths. |
 | `settings.fps` | f64 | Timeline/output frame rate. |
@@ -106,16 +106,57 @@ serialized with `#[serde(tag = "type")]`.)
   "position_secs": 12.0,        // where this clip starts on the timeline
   "source_in_secs": 3.5,        // in-point within the source media
   "source_out_secs": 9.0,       // out-point within the source media
-  "gain_db": 0.0,               // audio-only; present but ignored (0.0) for video-only clips with no embedded audio use
+  "gain_db": 0.0,               // audio gain (dB); Volume keyframes override when present
   "fade_in_secs": 0.0,          // audio export fade-in (Phase 1)
   "fade_out_secs": 0.0,         // audio export fade-out (Phase 1)
-  "enabled": true                // soft-disable without deleting
+  "enabled": true,              // soft-disable without deleting
+  "transform": {                // Phase 3.1 — static spatial + opacity (defaults = identity)
+    "x": 0.0,                   // NDC offset from canvas center (−1..1 ≈ left/right)
+    "y": 0.0,
+    "scale_x": 1.0,             // 1.0 = cover-fit size after aspect crop
+    "scale_y": 1.0,
+    "rotation_deg": 0.0,
+    "opacity": 1.0              // 0..1
+  },
+  "keyframes": [],              // Phase 3.1 — KeyframeTrack[] (see below)
+  "effects": []                 // Phase 3.1 — EffectInstance[] (store-only; no render path yet)
 }
 ```
 
 Duration on the timeline = `source_out_secs - source_in_secs`. Speed ramping is out of
 scope for v0 (Phase 4 feature) — no `speed` field yet; add one only when that feature is
 implemented, not preemptively.
+
+#### KeyframeTrack / Keyframe (Phase 3.1)
+
+```jsonc
+{
+  "property": "opacity",   // pos_x | pos_y | scale_x | scale_y | rotation | opacity | volume
+  "keys": [
+    { "time_secs": 0.0, "value": 1.0, "easing": "linear" },  // time relative to clip start
+    { "time_secs": 2.0, "value": 0.0, "easing": "ease_in_out" }
+  ]
+}
+```
+
+`easing` defaults to `linear` (`ease_in` | `ease_out` | `ease_in_out`). At most one track
+per `property`. Keys are sorted by `time_secs` on write. `Volume` keyframe values are
+absolute dB and replace static `gain_db` when present. Evaluation: `evaluate_transform` /
+`evaluate_volume_db` in `uppercut-core` (playback + export share the same path).
+
+#### EffectInstance (Phase 3.1 store-only)
+
+```jsonc
+{
+  "id": "effect-instance-uuid",
+  "effect_id": "builtin:blur",   // opaque; not executed in 3.1
+  "enabled": true,
+  "params": { "radius": 4.0 }
+}
+```
+
+Round-trips in JSON and survives `SplitClip` (right half gets fresh instance ids). Pixel
+shaders / registry land in later Phase 3 milestones.
 
 ### CaptionClip
 
@@ -134,12 +175,12 @@ Word-level timing (for word-by-word highlight caption styles) is deliberately de
 v0 captions are line-level. Add a `words: [{ text, start_offset_secs, end_offset_secs }]`
 field in a later schema version once the caption renderer needs it — don't add it unused.
 
-## What's intentionally not in v0
+## What's intentionally not in v2 yet
 
-Keyframes/animation, transitions, effects/filters, plugin references, and multi-cam are
-Phase 3+ features (PLAN.md §4) and have no schema representation yet. When they land, they
-extend `Clip` and/or add new top-level collections — update `schema_version` and this doc
-together with the code.
+Transitions, real effect shaders / LUTs / blur, WASM plugin host, asset packs, preview
+transform handles, and multi-cam are later Phase 3+ milestones (PLAN.md §4). Schema slots
+for `transform` / `keyframes` / `effects` exist; only transform+opacity (+ volume
+keyframes for audio) affect pixels/samples in 3.1.
 
 ## Version history
 
@@ -149,3 +190,5 @@ together with the code.
   `fade_out_secs`, `Settings.duck_db`.
 - **v1** (GUI rebuild M1, non-breaking): `Track.muted` / `locked` / `hidden`. v0 files
   load unchanged (fields default to `false`); no migration required.
+- **v2** (Phase 3.1 foundation): `MediaClip.transform`, `keyframes`, `effects`. v1 files
+  load with identity/empty defaults via `#[serde(default)]`; saves write `schema_version: 2`.

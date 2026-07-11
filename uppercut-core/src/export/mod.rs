@@ -2,12 +2,15 @@
 
 use crate::captions::{render_caption, CaptionError};
 use crate::commands::ExportPreset;
-use crate::compose::{ComposeError, Compositor};
+use crate::compose::{ComposeError, ComposeLayer, Compositor};
 use crate::media::{
     mix_timeline_audio, mux_video_audio, AudioMixClip, DuckSettings, FfmpegCliError, ReaderOptions,
     RgbaFrame, VideoEncoder, VideoReader,
 };
-use crate::project::{Clip, MediaKind, Project, TrackAudioRole, TrackKind};
+use crate::project::{
+    evaluate_transform, evaluate_volume_db, Clip, ClipTransform, MediaKind, Project,
+    TrackAudioRole, TrackKind,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -84,6 +87,7 @@ struct ActiveLayer {
     track_id: uuid::Uuid,
     path: PathBuf,
     source_time: f64,
+    transform: ClipTransform,
 }
 
 struct ActiveCaption {
@@ -163,7 +167,7 @@ impl FrameRenderer {
 
     pub fn render(&mut self, project: &Project, time_secs: f64) -> Result<Vec<u8>, ExportError> {
         let layers = active_layers(project, time_secs)?;
-        let mut rgba_layers = Vec::with_capacity(layers.len() + 2);
+        let mut compose_layers = Vec::with_capacity(layers.len() + 2);
 
         let reader_opts = ReaderOptions {
             target_height: self.decode_opts.target_height,
@@ -186,21 +190,27 @@ impl FrameRenderer {
                 *decoder = DecoderState::new(layer.path.clone(), reader_opts);
             }
             if let Some(frame) = decoder.frame_at(layer.source_time)? {
-                rgba_layers.push(frame);
+                compose_layers.push(ComposeLayer {
+                    frame,
+                    transform: layer.transform,
+                });
             }
         }
 
         for cap in active_captions(project, time_secs) {
-            rgba_layers.push(render_caption(
-                &cap.text,
-                &cap.style_id,
-                self.settings.width,
-                self.settings.height,
-            )?);
+            compose_layers.push(ComposeLayer {
+                frame: render_caption(
+                    &cap.text,
+                    &cap.style_id,
+                    self.settings.width,
+                    self.settings.height,
+                )?,
+                transform: ClipTransform::default(),
+            });
         }
 
         self.compositor
-            .composite(&rgba_layers)
+            .composite(&compose_layers)
             .map_err(ExportError::from)
     }
 }
@@ -375,7 +385,9 @@ fn collect_audio_clips(project: &Project) -> Vec<AudioMixClip> {
                     position_secs: a.position_secs,
                     source_in_secs: a.source_in_secs,
                     source_out_secs: a.source_out_secs,
-                    gain_db: a.gain_db,
+                    // Phase 3.1: honor Volume keyframes (evaluated at clip start for the
+                    // static FFmpeg volume filter; per-sample envelopes land later).
+                    gain_db: evaluate_volume_db(a, a.position_secs),
                     fade_in_secs: a.fade_in_secs,
                     fade_out_secs: a.fade_out_secs,
                     role: track.audio_role,
@@ -453,32 +465,39 @@ pub fn mix_timeline_audio_range_to_file(
         return Err(FfmpegCliError::NotFound.into());
     }
 
-    let clips = collect_audio_clips(project);
-    if clips.is_empty() {
-        return Ok(false);
-    }
-
     let end_secs = start_secs + duration_secs;
     let mut shifted = Vec::new();
-    for clip in clips {
-        let clip_len = clip.source_out_secs - clip.source_in_secs;
-        let clip_end = clip.position_secs + clip_len;
-        let overlap_start = start_secs.max(clip.position_secs);
-        let overlap_end = end_secs.min(clip_end);
-        if overlap_end <= overlap_start {
+    for track in &project.tracks {
+        if track.kind != TrackKind::Audio || track.muted {
             continue;
         }
-        let offset = overlap_start - clip.position_secs;
-        shifted.push(AudioMixClip {
-            path: clip.path.clone(),
-            position_secs: overlap_start - start_secs,
-            source_in_secs: clip.source_in_secs + offset,
-            source_out_secs: clip.source_in_secs + offset + (overlap_end - overlap_start),
-            gain_db: clip.gain_db,
-            fade_in_secs: clip.fade_in_secs,
-            fade_out_secs: clip.fade_out_secs,
-            role: clip.role,
-        });
+        for clip in &track.clips {
+            let Clip::Audio(a) = clip else { continue };
+            if !a.enabled {
+                continue;
+            }
+            let Some(media) = project.find_media(a.media_id) else {
+                continue;
+            };
+            let clip_len = a.source_out_secs - a.source_in_secs;
+            let clip_end = a.position_secs + clip_len;
+            let overlap_start = start_secs.max(a.position_secs);
+            let overlap_end = end_secs.min(clip_end);
+            if overlap_end <= overlap_start {
+                continue;
+            }
+            let offset = overlap_start - a.position_secs;
+            shifted.push(AudioMixClip {
+                path: media.path.clone(),
+                position_secs: overlap_start - start_secs,
+                source_in_secs: a.source_in_secs + offset,
+                source_out_secs: a.source_in_secs + offset + (overlap_end - overlap_start),
+                gain_db: evaluate_volume_db(a, overlap_start),
+                fade_in_secs: a.fade_in_secs,
+                fade_out_secs: a.fade_out_secs,
+                role: track.audio_role,
+            });
+        }
     }
     if shifted.is_empty() {
         return Ok(false);
@@ -541,6 +560,7 @@ fn active_layers(project: &Project, t: f64) -> Result<Vec<ActiveLayer>, ExportEr
                     track_id: track.id,
                     path: media.path.clone(),
                     source_time,
+                    transform: evaluate_transform(v, t),
                 });
                 break;
             }
@@ -640,6 +660,7 @@ mod tests {
                 enabled: true,
                 fade_in_secs: 0.0,
                 fade_out_secs: 0.0,
+                ..Default::default()
             }));
 
         export_project(
@@ -698,6 +719,7 @@ mod tests {
                 enabled: true,
                 fade_in_secs: 0.0,
                 fade_out_secs: 0.0,
+                ..Default::default()
             }));
 
         let err = export_project_with_progress(
@@ -734,6 +756,7 @@ mod tests {
                 enabled: true,
                 fade_in_secs: 0.0,
                 fade_out_secs: 0.0,
+                ..Default::default()
             }));
         assert!((timeline_duration(&project) - 3.0).abs() < 1e-9);
     }
@@ -770,6 +793,7 @@ mod tests {
             enabled: true,
             fade_in_secs: 0.0,
             fade_out_secs: 0.0,
+            ..Default::default()
         }));
         project.tracks.push(track);
 
@@ -801,6 +825,7 @@ mod tests {
             enabled: true,
             fade_in_secs: 0.0,
             fade_out_secs: 0.0,
+            ..Default::default()
         }));
         project.tracks.push(track);
 
@@ -858,6 +883,7 @@ mod tests {
                 enabled: true,
                 fade_in_secs: 0.0,
                 fade_out_secs: 0.0,
+                ..Default::default()
             }));
 
         let settings = ExportSettings {
@@ -916,6 +942,7 @@ mod tests {
                 enabled: true,
                 fade_in_secs: 0.0,
                 fade_out_secs: 0.0,
+                ..Default::default()
             }));
             project.tracks.push(track);
         }

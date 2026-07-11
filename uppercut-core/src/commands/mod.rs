@@ -3,7 +3,10 @@
 
 use crate::audio::{synthesize_to_wav, VoiceoverProvider};
 use crate::media::{self, MediaError};
-use crate::project::{CaptionClip, Clip, Id, MediaClip, Project, Track, TrackAudioRole, TrackKind};
+use crate::project::{
+    clone_effects_with_new_ids, split_keyframes, AnimProperty, CaptionClip, Clip, ClipTransform,
+    EffectInstance, Id, KeyframeTrack, MediaClip, Project, Track, TrackAudioRole, TrackKind,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -133,6 +136,24 @@ pub enum Command {
         clip_id: Id,
         enabled: bool,
     },
+    /// Replace the static transform on a media clip (Phase 3.1).
+    SetClipTransform {
+        track_id: Id,
+        clip_id: Id,
+        transform: ClipTransform,
+    },
+    /// Replace all keyframe tracks on a media clip (Phase 3.1).
+    SetClipKeyframes {
+        track_id: Id,
+        clip_id: Id,
+        keyframes: Vec<KeyframeTrack>,
+    },
+    /// Replace effect instance list (store-only in 3.1; no render path).
+    SetClipEffects {
+        track_id: Id,
+        clip_id: Id,
+        effects: Vec<EffectInstance>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,6 +223,12 @@ pub enum CommandError {
     InvalidDuration(f64),
     #[error("invalid fps: {0} must be > 0")]
     InvalidFps(f64),
+    #[error("invalid transform: non-finite or out-of-range field")]
+    InvalidTransform,
+    #[error("invalid keyframes: {0}")]
+    InvalidKeyframes(String),
+    #[error("invalid effects: {0}")]
+    InvalidEffects(String),
     #[error("not yet implemented: {0}")]
     NotImplemented(&'static str),
 }
@@ -336,6 +363,21 @@ pub fn apply_command(project: &mut Project, cmd: Command) -> Result<CommandOutco
             clip_id,
             enabled,
         } => set_clip_enabled(project, track_id, clip_id, enabled),
+        Command::SetClipTransform {
+            track_id,
+            clip_id,
+            transform,
+        } => set_clip_transform(project, track_id, clip_id, transform),
+        Command::SetClipKeyframes {
+            track_id,
+            clip_id,
+            keyframes,
+        } => set_clip_keyframes(project, track_id, clip_id, keyframes),
+        Command::SetClipEffects {
+            track_id,
+            clip_id,
+            effects,
+        } => set_clip_effects(project, track_id, clip_id, effects),
     }
 }
 
@@ -475,6 +517,7 @@ fn add_clip(
         enabled: true,
         fade_in_secs: 0.0,
         fade_out_secs: 0.0,
+        ..Default::default()
     };
     let clip = match track.kind {
         TrackKind::Video => Clip::Video(media_clip),
@@ -519,6 +562,10 @@ fn split_clip(
             m.source_out_secs = m.source_in_secs + split_offset;
             right_m.position_secs = at_secs;
             right_m.source_in_secs = m.source_out_secs;
+            let (left_kf, right_kf) = split_keyframes(&m.keyframes, split_offset);
+            m.keyframes = left_kf;
+            right_m.keyframes = right_kf;
+            right_m.effects = clone_effects_with_new_ids(&m.effects);
             (Clip::Video(m), Clip::Video(right_m))
         }
         Clip::Audio(mut m) => {
@@ -527,6 +574,10 @@ fn split_clip(
             m.source_out_secs = m.source_in_secs + split_offset;
             right_m.position_secs = at_secs;
             right_m.source_in_secs = m.source_out_secs;
+            let (left_kf, right_kf) = split_keyframes(&m.keyframes, split_offset);
+            m.keyframes = left_kf;
+            right_m.keyframes = right_kf;
+            right_m.effects = clone_effects_with_new_ids(&m.effects);
             (Clip::Audio(m), Clip::Audio(right_m))
         }
         Clip::Caption(mut c) => {
@@ -1051,6 +1102,124 @@ fn set_clip_enabled(
     }
 }
 
+fn media_clip_mut(
+    project: &mut Project,
+    track_id: Id,
+    clip_id: Id,
+) -> Result<&mut MediaClip, CommandError> {
+    let track = project
+        .find_track_mut(track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    let clip = track
+        .clips
+        .iter_mut()
+        .find(|c| c.id() == clip_id)
+        .ok_or(CommandError::ClipNotFound(clip_id, track_id))?;
+    clip.as_media_mut()
+        .ok_or(CommandError::NotMediaClip(clip_id))
+}
+
+fn validate_transform(t: &ClipTransform) -> Result<ClipTransform, CommandError> {
+    if ![t.x, t.y, t.scale_x, t.scale_y, t.rotation_deg, t.opacity]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return Err(CommandError::InvalidTransform);
+    }
+    Ok(t.clamp_opacity())
+}
+
+fn validate_keyframes(tracks: Vec<KeyframeTrack>) -> Result<Vec<KeyframeTrack>, CommandError> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(tracks.len());
+    for mut track in tracks {
+        if !seen.insert(track.property) {
+            return Err(CommandError::InvalidKeyframes(format!(
+                "duplicate property {:?}",
+                track.property
+            )));
+        }
+        for key in &track.keys {
+            if !key.time_secs.is_finite() || key.time_secs < 0.0 || !key.value.is_finite() {
+                return Err(CommandError::InvalidKeyframes(
+                    "non-finite or negative keyframe".into(),
+                ));
+            }
+            if track.property == AnimProperty::Opacity && !(0.0..=1.0).contains(&key.value) {
+                return Err(CommandError::InvalidKeyframes(
+                    "opacity keyframe must be in 0..=1".into(),
+                ));
+            }
+        }
+        track.keys.sort_by(|a, b| {
+            a.time_secs
+                .partial_cmp(&b.time_secs)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        out.push(track);
+    }
+    Ok(out)
+}
+
+fn validate_effects(effects: Vec<EffectInstance>) -> Result<Vec<EffectInstance>, CommandError> {
+    let mut ids = std::collections::HashSet::new();
+    for effect in &effects {
+        if effect.effect_id.trim().is_empty() {
+            return Err(CommandError::InvalidEffects("empty effect_id".into()));
+        }
+        if !ids.insert(effect.id) {
+            return Err(CommandError::InvalidEffects(format!(
+                "duplicate effect id {}",
+                effect.id
+            )));
+        }
+        for (k, v) in &effect.params {
+            if !v.is_finite() {
+                return Err(CommandError::InvalidEffects(format!(
+                    "non-finite param '{k}'"
+                )));
+            }
+        }
+    }
+    Ok(effects)
+}
+
+fn set_clip_transform(
+    project: &mut Project,
+    track_id: Id,
+    clip_id: Id,
+    transform: ClipTransform,
+) -> Result<CommandOutcome, CommandError> {
+    let transform = validate_transform(&transform)?;
+    let clip = media_clip_mut(project, track_id, clip_id)?;
+    clip.transform = transform;
+    Ok(CommandOutcome::Applied)
+}
+
+fn set_clip_keyframes(
+    project: &mut Project,
+    track_id: Id,
+    clip_id: Id,
+    keyframes: Vec<KeyframeTrack>,
+) -> Result<CommandOutcome, CommandError> {
+    let keyframes = validate_keyframes(keyframes)?;
+    let clip = media_clip_mut(project, track_id, clip_id)?;
+    clip.keyframes = keyframes;
+    Ok(CommandOutcome::Applied)
+}
+
+fn set_clip_effects(
+    project: &mut Project,
+    track_id: Id,
+    clip_id: Id,
+    effects: Vec<EffectInstance>,
+) -> Result<CommandOutcome, CommandError> {
+    let effects = validate_effects(effects)?;
+    let clip = media_clip_mut(project, track_id, clip_id)?;
+    clip.effects = effects;
+    Ok(CommandOutcome::Applied)
+}
+
 fn generate_voiceover(
     project: &mut Project,
     text: &str,
@@ -1118,7 +1287,7 @@ fn generate_voiceover(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::{Project, Settings};
+    use crate::project::{Easing, Keyframe, Project, Settings};
     use std::io::Write;
 
     fn test_project() -> Project {
@@ -2484,5 +2653,301 @@ mod tests {
                 || matches!(err, CommandError::NotImplemented(_)),
             "unexpected: {err:?}"
         );
+    }
+
+    fn setup_audio_clip() -> (Project, Id, Id, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("uppercut-test-{}", Id::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav_path = write_temp_wav(&dir, "clip.wav", 10.0);
+        let mut project = test_project();
+        let media_id = match apply_command(
+            &mut project,
+            Command::ImportMedia {
+                path: wav_path.to_string_lossy().to_string(),
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::MediaImported { media_id } => media_id,
+            _ => unreachable!(),
+        };
+        let track_id = match apply_command(
+            &mut project,
+            Command::AddTrack {
+                kind: TrackKind::Audio,
+                name: "A1".into(),
+                id: None,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        };
+        let clip_id = match apply_command(
+            &mut project,
+            Command::AddClip {
+                track_id,
+                media_id,
+                position_secs: 0.0,
+                source_in_secs: 0.0,
+                source_out_secs: 6.0,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::ClipAdded { clip_id } => clip_id,
+            _ => unreachable!(),
+        };
+        (project, track_id, clip_id, dir)
+    }
+
+    #[test]
+    fn set_clip_transform_updates_media_clip() {
+        let (mut project, track_id, clip_id, dir) = setup_audio_clip();
+        let transform = ClipTransform {
+            x: 0.25,
+            y: -0.1,
+            scale_x: 1.2,
+            scale_y: 0.8,
+            rotation_deg: 15.0,
+            opacity: 0.5,
+        };
+        apply_command(
+            &mut project,
+            Command::SetClipTransform {
+                track_id,
+                clip_id,
+                transform,
+            },
+        )
+        .unwrap();
+        let clip = project
+            .find_track(track_id)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id() == clip_id)
+            .unwrap()
+            .as_media()
+            .unwrap();
+        assert_eq!(clip.transform, transform);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn set_clip_keyframes_sorts_and_rejects_duplicates() {
+        let (mut project, track_id, clip_id, dir) = setup_audio_clip();
+        apply_command(
+            &mut project,
+            Command::SetClipKeyframes {
+                track_id,
+                clip_id,
+                keyframes: vec![KeyframeTrack {
+                    property: AnimProperty::Opacity,
+                    keys: vec![
+                        Keyframe {
+                            time_secs: 2.0,
+                            value: 1.0,
+                            easing: Easing::Linear,
+                        },
+                        Keyframe {
+                            time_secs: 0.0,
+                            value: 0.0,
+                            easing: Easing::Linear,
+                        },
+                    ],
+                }],
+            },
+        )
+        .unwrap();
+        let clip = project
+            .find_track(track_id)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id() == clip_id)
+            .unwrap()
+            .as_media()
+            .unwrap();
+        assert!((clip.keyframes[0].keys[0].time_secs - 0.0).abs() < 1e-9);
+        assert!((clip.keyframes[0].keys[1].time_secs - 2.0).abs() < 1e-9);
+
+        let err = apply_command(
+            &mut project,
+            Command::SetClipKeyframes {
+                track_id,
+                clip_id,
+                keyframes: vec![
+                    KeyframeTrack {
+                        property: AnimProperty::Opacity,
+                        keys: vec![],
+                    },
+                    KeyframeTrack {
+                        property: AnimProperty::Opacity,
+                        keys: vec![],
+                    },
+                ],
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::InvalidKeyframes(_)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn set_clip_effects_stores_and_rejects_duplicate_ids() {
+        let (mut project, track_id, clip_id, dir) = setup_audio_clip();
+        let effect_id = Id::new_v4();
+        apply_command(
+            &mut project,
+            Command::SetClipEffects {
+                track_id,
+                clip_id,
+                effects: vec![EffectInstance {
+                    id: effect_id,
+                    effect_id: "builtin:blur".into(),
+                    enabled: true,
+                    params: [("radius".into(), 4.0)].into_iter().collect(),
+                }],
+            },
+        )
+        .unwrap();
+        let clip = project
+            .find_track(track_id)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id() == clip_id)
+            .unwrap()
+            .as_media()
+            .unwrap();
+        assert_eq!(clip.effects.len(), 1);
+        assert_eq!(clip.effects[0].effect_id, "builtin:blur");
+
+        let err = apply_command(
+            &mut project,
+            Command::SetClipEffects {
+                track_id,
+                clip_id,
+                effects: vec![
+                    EffectInstance {
+                        id: effect_id,
+                        effect_id: "builtin:blur".into(),
+                        enabled: true,
+                        params: Default::default(),
+                    },
+                    EffectInstance {
+                        id: effect_id,
+                        effect_id: "builtin:lut".into(),
+                        enabled: true,
+                        params: Default::default(),
+                    },
+                ],
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::InvalidEffects(_)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn split_clip_remaps_keyframes_and_remints_effect_ids() {
+        let (mut project, track_id, clip_id, dir) = setup_audio_clip();
+        let effect_id = Id::new_v4();
+        apply_command(
+            &mut project,
+            Command::SetClipTransform {
+                track_id,
+                clip_id,
+                transform: ClipTransform {
+                    opacity: 0.75,
+                    ..ClipTransform::default()
+                },
+            },
+        )
+        .unwrap();
+        apply_command(
+            &mut project,
+            Command::SetClipKeyframes {
+                track_id,
+                clip_id,
+                keyframes: vec![KeyframeTrack {
+                    property: AnimProperty::Opacity,
+                    keys: vec![
+                        Keyframe {
+                            time_secs: 0.0,
+                            value: 1.0,
+                            easing: Easing::Linear,
+                        },
+                        Keyframe {
+                            time_secs: 2.0,
+                            value: 0.5,
+                            easing: Easing::Linear,
+                        },
+                        Keyframe {
+                            time_secs: 4.0,
+                            value: 0.0,
+                            easing: Easing::Linear,
+                        },
+                    ],
+                }],
+            },
+        )
+        .unwrap();
+        apply_command(
+            &mut project,
+            Command::SetClipEffects {
+                track_id,
+                clip_id,
+                effects: vec![EffectInstance {
+                    id: effect_id,
+                    effect_id: "builtin:blur".into(),
+                    enabled: true,
+                    params: Default::default(),
+                }],
+            },
+        )
+        .unwrap();
+
+        let outcome = apply_command(
+            &mut project,
+            Command::SplitClip {
+                track_id,
+                clip_id,
+                at_secs: 2.5,
+            },
+        )
+        .unwrap();
+        let CommandOutcome::ClipSplit { left_id, right_id } = outcome else {
+            panic!("expected ClipSplit");
+        };
+
+        let track = project.find_track(track_id).unwrap();
+        let left = track
+            .clips
+            .iter()
+            .find(|c| c.id() == left_id)
+            .unwrap()
+            .as_media()
+            .unwrap();
+        let right = track
+            .clips
+            .iter()
+            .find(|c| c.id() == right_id)
+            .unwrap()
+            .as_media()
+            .unwrap();
+
+        assert!((left.transform.opacity - 0.75).abs() < 1e-9);
+        assert!((right.transform.opacity - 0.75).abs() < 1e-9);
+        assert_eq!(left.keyframes[0].keys.len(), 2);
+        assert_eq!(right.keyframes[0].keys.len(), 1);
+        assert!((right.keyframes[0].keys[0].time_secs - 1.5).abs() < 1e-9);
+        assert_eq!(left.effects[0].id, effect_id);
+        assert_ne!(right.effects[0].id, effect_id);
+        assert_eq!(right.effects[0].effect_id, "builtin:blur");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

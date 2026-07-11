@@ -1,12 +1,20 @@
-//! Project schema v1 — matches docs/project-schema.md exactly.
+//! Project schema v2 — matches docs/project-schema.md exactly.
 //! If you change a type here, update that doc in the same change.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+pub mod anim;
+
+pub use anim::{evaluate_transform, evaluate_volume_db};
 
 pub type Id = uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 1;
+/// Current on-disk schema. Loaders accept `1` and `2` (v1 files get serde defaults for
+/// new fields); new projects and saves write `2`.
+pub const SCHEMA_VERSION: u32 = 2;
+pub const MIN_LOADABLE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
@@ -184,6 +192,127 @@ impl Clip {
     pub fn end_secs(&self) -> f64 {
         self.position_secs() + self.duration_secs()
     }
+
+    pub fn as_media(&self) -> Option<&MediaClip> {
+        match self {
+            Clip::Video(c) | Clip::Audio(c) => Some(c),
+            Clip::Caption(_) => None,
+        }
+    }
+
+    pub fn as_media_mut(&mut self) -> Option<&mut MediaClip> {
+        match self {
+            Clip::Video(c) | Clip::Audio(c) => Some(c),
+            Clip::Caption(_) => None,
+        }
+    }
+}
+
+/// Static spatial + opacity transform for a media clip (Phase 3.1).
+/// Keyframes override these when present for a given property.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ClipTransform {
+    /// NDC offset from canvas center (−1 ≈ left/bottom edge, +1 ≈ right/top).
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+    /// 1.0 = cover-fit size after aspect crop.
+    #[serde(default = "default_scale")]
+    pub scale_x: f64,
+    #[serde(default = "default_scale")]
+    pub scale_y: f64,
+    #[serde(default)]
+    pub rotation_deg: f64,
+    /// 0..1
+    #[serde(default = "default_opacity")]
+    pub opacity: f64,
+}
+
+fn default_scale() -> f64 {
+    1.0
+}
+
+fn default_opacity() -> f64 {
+    1.0
+}
+
+impl Default for ClipTransform {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            rotation_deg: 0.0,
+            opacity: 1.0,
+        }
+    }
+}
+
+impl ClipTransform {
+    pub fn is_identity(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn clamp_opacity(self) -> Self {
+        Self {
+            opacity: self.opacity.clamp(0.0, 1.0),
+            ..self
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnimProperty {
+    PosX,
+    PosY,
+    ScaleX,
+    ScaleY,
+    Rotation,
+    Opacity,
+    Volume,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Easing {
+    #[default]
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Keyframe {
+    /// Time relative to the clip's timeline start (`position_secs`).
+    pub time_secs: f64,
+    pub value: f64,
+    #[serde(default)]
+    pub easing: Easing,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeyframeTrack {
+    pub property: AnimProperty,
+    pub keys: Vec<Keyframe>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectInstance {
+    pub id: Id,
+    /// Opaque id reserved for Phase 3.2+ (e.g. `builtin:blur`). Not executed in 3.1.
+    pub effect_id: String,
+    #[serde(default = "default_effect_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub params: BTreeMap<String, f64>,
+}
+
+fn default_effect_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,6 +330,14 @@ pub struct MediaClip {
     /// Fade-out duration at the clip end (audio export, Phase 1).
     #[serde(default)]
     pub fade_out_secs: f64,
+    /// Static transform (Phase 3.1). Overridden per-property by `keyframes` when present.
+    #[serde(default)]
+    pub transform: ClipTransform,
+    #[serde(default)]
+    pub keyframes: Vec<KeyframeTrack>,
+    /// Effect slots (Phase 3.1 store-only; no render path yet).
+    #[serde(default)]
+    pub effects: Vec<EffectInstance>,
 }
 
 impl Default for MediaClip {
@@ -215,8 +352,62 @@ impl Default for MediaClip {
             enabled: true,
             fade_in_secs: 0.0,
             fade_out_secs: 0.0,
+            transform: ClipTransform::default(),
+            keyframes: Vec::new(),
+            effects: Vec::new(),
         }
     }
+}
+
+/// Split keyframe tracks at `split_offset` (seconds from clip start). Left keeps keys
+/// with `t < split_offset`; right remaps surviving keys to `t - split_offset`.
+pub fn split_keyframes(
+    tracks: &[KeyframeTrack],
+    split_offset: f64,
+) -> (Vec<KeyframeTrack>, Vec<KeyframeTrack>) {
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for track in tracks {
+        let mut left_keys = Vec::new();
+        let mut right_keys = Vec::new();
+        for key in &track.keys {
+            if key.time_secs < split_offset {
+                left_keys.push(key.clone());
+            } else {
+                right_keys.push(Keyframe {
+                    time_secs: key.time_secs - split_offset,
+                    value: key.value,
+                    easing: key.easing,
+                });
+            }
+        }
+        if !left_keys.is_empty() {
+            left.push(KeyframeTrack {
+                property: track.property,
+                keys: left_keys,
+            });
+        }
+        if !right_keys.is_empty() {
+            right.push(KeyframeTrack {
+                property: track.property,
+                keys: right_keys,
+            });
+        }
+    }
+    (left, right)
+}
+
+/// Clone effects for the right half of a split, minting fresh instance ids.
+pub fn clone_effects_with_new_ids(effects: &[EffectInstance]) -> Vec<EffectInstance> {
+    effects
+        .iter()
+        .map(|e| EffectInstance {
+            id: Id::new_v4(),
+            effect_id: e.effect_id.clone(),
+            enabled: e.enabled,
+            params: e.params.clone(),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,4 +417,54 @@ pub struct CaptionClip {
     pub position_secs: f64,
     pub duration_secs: f64,
     pub style_id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v1_media_clip_json_deserializes_with_transform_defaults() {
+        let json = r#"{
+            "id": "00000000-0000-4000-8000-000000000001",
+            "media_id": "00000000-0000-4000-8000-000000000002",
+            "position_secs": 0.0,
+            "source_in_secs": 0.0,
+            "source_out_secs": 5.0,
+            "gain_db": 0.0,
+            "enabled": true
+        }"#;
+        let clip: MediaClip = serde_json::from_str(json).unwrap();
+        assert!(clip.transform.is_identity());
+        assert!(clip.keyframes.is_empty());
+        assert!(clip.effects.is_empty());
+    }
+
+    #[test]
+    fn split_keyframes_remaps_right() {
+        let tracks = vec![KeyframeTrack {
+            property: AnimProperty::Opacity,
+            keys: vec![
+                Keyframe {
+                    time_secs: 0.0,
+                    value: 1.0,
+                    easing: Easing::Linear,
+                },
+                Keyframe {
+                    time_secs: 2.0,
+                    value: 0.5,
+                    easing: Easing::Linear,
+                },
+                Keyframe {
+                    time_secs: 4.0,
+                    value: 0.0,
+                    easing: Easing::Linear,
+                },
+            ],
+        }];
+        let (left, right) = split_keyframes(&tracks, 2.5);
+        assert_eq!(left[0].keys.len(), 2);
+        assert_eq!(right[0].keys.len(), 1);
+        assert!((right[0].keys[0].time_secs - 1.5).abs() < 1e-9);
+    }
 }

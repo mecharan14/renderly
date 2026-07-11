@@ -3,32 +3,48 @@ struct VertexOutput {
     @location(0) uv: vec2<f32>,
 };
 
-// "Cover" crop: scale/offset remap the visible-viewport UV range (0..1) to the
-// sub-rectangle of the source texture that fills the output without distorting aspect
-// ratio, cropping any overflow. Identity (scale=1, offset=0) when the layer already
-// matches the output's aspect ratio (e.g. burned-in caption layers).
-struct LayerTransform {
-    scale: vec2<f32>,
-    offset: vec2<f32>,
+// Cover UV remap + user spatial transform + opacity (Phase 3.1).
+struct LayerParams {
+    cover_scale: vec2<f32>,
+    cover_offset: vec2<f32>,
+    user_translate: vec2<f32>,
+    user_scale: vec2<f32>,
+    rotation_rad: f32,
+    opacity: f32,
+    _pad: vec2<f32>,
 };
 
-@group(0) @binding(2) var<uniform> layer_transform: LayerTransform;
+@group(0) @binding(2) var<uniform> layer: LayerParams;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    var positions = array<vec2<f32>, 3>(
+    // Two triangles covering NDC [-1,1]^2 (proper quad — needed for rotation/scale).
+    var positions = array<vec2<f32>, 6>(
         vec2<f32>(-1.0, -1.0),
-        vec2<f32>(3.0, -1.0),
-        vec2<f32>(-1.0, 3.0),
+        vec2<f32>(1.0, -1.0),
+        vec2<f32>(-1.0, 1.0),
+        vec2<f32>(-1.0, 1.0),
+        vec2<f32>(1.0, -1.0),
+        vec2<f32>(1.0, 1.0),
     );
-    var uvs = array<vec2<f32>, 3>(
+    var uvs = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 1.0),
-        vec2<f32>(2.0, 1.0),
-        vec2<f32>(0.0, -1.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(1.0, 0.0),
     );
+
+    var pos = positions[vertex_index] * layer.user_scale;
+    let c = cos(layer.rotation_rad);
+    let s = sin(layer.rotation_rad);
+    pos = vec2<f32>(pos.x * c - pos.y * s, pos.x * s + pos.y * c);
+    pos = pos + layer.user_translate;
+
     var out: VertexOutput;
-    out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
-    out.uv = uvs[vertex_index] * layer_transform.scale + layer_transform.offset;
+    out.position = vec4<f32>(pos, 0.0, 1.0);
+    out.uv = uvs[vertex_index] * layer.cover_scale + layer.cover_offset;
     return out;
 }
 
@@ -37,5 +53,6 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    return textureSample(layer_tex, layer_sampler, input.uv);
+    let color = textureSample(layer_tex, layer_sampler, input.uv);
+    return vec4<f32>(color.rgb, color.a * layer.opacity);
 }

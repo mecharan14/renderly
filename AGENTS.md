@@ -86,13 +86,12 @@ Before considering a change complete:
 
 ## 4. Current phase
 
-Check PLAN.md §4 for the phase roadmap. **Phase 2 GUI rebuild (M0–M7) is complete:** Tauri 2
-app with React + Zustand chrome, PlaybackEngine (async, no main-thread freeze), schema v1
-track flags + undo/redo, canvas timeline (drag/trim/split/razor/snap/zoom), media
-thumbnails/waveforms, transport/aspect/inspectors, export with progress + cancel, and M7
-polish (empty states, skeletons, focus/scrollbars, QA checklist in
-[docs/qa-checklist.md](docs/qa-checklist.md)). **Phase 3 (effects, WASM plugins, asset
-packs) is next.**
+Check PLAN.md §4 for the phase roadmap. **Phase 2 GUI rebuild (M0–M7) is complete.**
+**Phase 3 is in progress:** **3.1 foundation landed** — schema v2 (`ClipTransform`,
+keyframe tracks, effect-instance slots), `SetClipTransform` / `SetClipKeyframes` /
+`SetClipEffects`, compositor transform+opacity (+ audio volume keyframes), minimal
+inspector transform fields. Later 3.x: preview handles, real effects/transitions, WASM
+plugins, asset packs.
 
 ## 5. When in doubt
 

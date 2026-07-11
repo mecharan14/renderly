@@ -1,4 +1,4 @@
-// TS mirror of uppercut-core's project schema v1 (docs/project-schema.md). Keep in sync.
+// TS mirror of uppercut-core's project schema v2 (docs/project-schema.md). Keep in sync.
 
 export interface Project {
   schema_version: number;
@@ -8,6 +8,53 @@ export interface Project {
   media: MediaItem[];
   tracks: Track[];
 }
+
+export interface ClipTransform {
+  x: number;
+  y: number;
+  scale_x: number;
+  scale_y: number;
+  rotation_deg: number;
+  opacity: number;
+}
+
+export type AnimProperty =
+  | "pos_x"
+  | "pos_y"
+  | "scale_x"
+  | "scale_y"
+  | "rotation"
+  | "opacity"
+  | "volume";
+
+export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out";
+
+export interface Keyframe {
+  time_secs: number;
+  value: number;
+  easing?: Easing;
+}
+
+export interface KeyframeTrack {
+  property: AnimProperty;
+  keys: Keyframe[];
+}
+
+export interface EffectInstance {
+  id: string;
+  effect_id: string;
+  enabled: boolean;
+  params: Record<string, number>;
+}
+
+export const IDENTITY_TRANSFORM: ClipTransform = {
+  x: 0,
+  y: 0,
+  scale_x: 1,
+  scale_y: 1,
+  rotation_deg: 0,
+  opacity: 1,
+};
 
 export interface ProjectSettings {
   fps: number;
@@ -54,6 +101,9 @@ export interface MediaClip {
   enabled: boolean;
   fade_in_secs: number;
   fade_out_secs: number;
+  transform?: ClipTransform;
+  keyframes?: KeyframeTrack[];
+  effects?: EffectInstance[];
 }
 
 export interface CaptionClip {

@@ -1,11 +1,13 @@
 # Architecture
 
-Status: **GUI rebuild M0–M7 complete.** Export drives FFmpeg subprocess decode/encode with an
+Status: **Phase 3.1 foundation landed.** Export drives FFmpeg subprocess decode/encode with an
 offscreen wgpu compositor; the Tauri app adds a native wgpu preview surface on Windows, now
 backed by a persistent playback engine (see "Playback engine" below) instead of the Phase 2
 MVP's per-frame render path. Linked libav via `ffmpeg-the-third` replaces the subprocess
-bridge once vcpkg/FFMPEG_DIR is standard in dev/CI. Phase 3 adds effects graph, plugin host,
-and asset packs — see [PLAN.md](../PLAN.md). Manual QA: [qa-checklist.md](qa-checklist.md).
+bridge once vcpkg/FFMPEG_DIR is standard in dev/CI. Phase 3.1 adds schema v2 clip transform /
+keyframes / effect slots, compositor hooks for transform+opacity, and volume keyframe
+evaluation — real effect shaders, transitions, WASM plugin host, and asset packs follow in
+later 3.x milestones (see [PLAN.md](../PLAN.md)). Manual QA: [qa-checklist.md](qa-checklist.md).
 
 ## Crate graph
 
@@ -37,8 +39,9 @@ Owns:
 - **Media I/O** — FFmpeg-backed decode/encode. Phase 0 invokes `ffmpeg`/`ffprobe` as
   subprocesses (no link-time libav dependency); migrate to `ffmpeg-the-third` when dev/CI
   ships FFmpeg development libraries consistently.
-- **Compositing** — wgpu offscreen render graph (Phase 0: scale/blit layers to output
-  resolution; effects graph in Phase 3).
+- **Compositing** — wgpu offscreen render graph (Phase 0: cover-fit scale/blit; Phase 3.1:
+  per-layer user translate/scale/rotate + opacity on top of cover UV). Full effects graph /
+  transitions / WASM plugins are later Phase 3 milestones.
 - **Perception** — frame rendering to image, transcript (whisper-rs), scene/silence
   detection. These back the MCP perception tools and are engine functions, not MCP-specific
   code, so the CLI can expose them too.
@@ -326,14 +329,15 @@ independent of the GUI cache) is a follow-up, not yet wired up.
 
 ## Plugins (Phase 3+)
 
-Two tiers, not yet implemented:
+Phase 3.1 foundation (schema slots + compositor transform hooks) is in; the two plugin
+tiers below are not yet implemented:
 
 - **Asset packs** — data-only (JSON manifest + media), interpreted by `uppercut-core`
   against existing engine capabilities (transitions-as-shader-params, caption style
   presets, LUTs, stickers). No sandboxing concerns because there's no code.
 - **WASM plugins** — sandboxed via `wasmtime`, capability-scoped API for frame effects,
   audio effects, generators/analyzers, and integrations. Design doc to be added under
-  `docs/plugin-api.md` when Phase 3 starts.
+  `docs/plugin-api.md` when that milestone starts.
 
 ## Why this shape
 
