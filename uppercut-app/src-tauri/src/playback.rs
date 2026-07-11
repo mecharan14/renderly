@@ -17,7 +17,7 @@ use rodio::{Decoder, OutputStreamBuilder, Sink};
 use std::fs::File;
 use std::io::{BufReader, Cursor};
 use std::sync::{
-    atomic::{AtomicU32, AtomicUsize, Ordering},
+    atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
     Arc,
 };
 use std::thread::{self, JoinHandle};
@@ -58,6 +58,11 @@ struct ScrubRequest {
     decode_opts: DecodeOptions,
     with_audio_blip: bool,
     app: AppHandle,
+    /// `play_epoch` at submission time — lets the scrub worker detect a `play()` call
+    /// that started after this request was queued (or while it was mid-render) and skip
+    /// presenting a now-stale frame instead of it landing after, and overwriting, a live
+    /// playback frame. See the two checks in `run_scrub_worker`.
+    epoch: u64,
 }
 
 pub struct PlaybackEngine {
@@ -65,19 +70,23 @@ pub struct PlaybackEngine {
     target_height: AtomicU32,
     scrub_pending: Arc<Mutex<Option<ScrubRequest>>>,
     _scrub_thread: JoinHandle<()>,
+    play_epoch: Arc<AtomicU64>,
 }
 
 impl PlaybackEngine {
     pub fn new() -> Self {
         let scrub_pending: Arc<Mutex<Option<ScrubRequest>>> = Arc::new(Mutex::new(None));
         let worker_pending = Arc::clone(&scrub_pending);
-        let scrub_thread = thread::spawn(move || run_scrub_worker(worker_pending));
+        let play_epoch = Arc::new(AtomicU64::new(0));
+        let worker_epoch = Arc::clone(&play_epoch);
+        let scrub_thread = thread::spawn(move || run_scrub_worker(worker_pending, worker_epoch));
 
         Self {
             session: Mutex::new(None),
             target_height: AtomicU32::new(0),
             scrub_pending,
             _scrub_thread: scrub_thread,
+            play_epoch,
         }
     }
 
@@ -143,6 +152,9 @@ impl PlaybackEngine {
 
     pub fn play(&self, app: AppHandle, project: Project, start_secs: f64) {
         self.stop();
+        // Claims the preview surface for this playback generation — see `ScrubRequest`'s
+        // `epoch` doc comment.
+        self.play_epoch.fetch_add(1, Ordering::SeqCst);
 
         let duration = timeline_duration(&project);
         let fps = project.settings.fps.max(1.0);
@@ -233,6 +245,7 @@ impl PlaybackEngine {
             decode_opts,
             with_audio_blip,
             app,
+            epoch: self.play_epoch.load(Ordering::SeqCst),
         });
     }
 }
@@ -405,7 +418,7 @@ fn run_playback_loop(
     }
 }
 
-fn run_scrub_worker(pending: Arc<Mutex<Option<ScrubRequest>>>) {
+fn run_scrub_worker(pending: Arc<Mutex<Option<ScrubRequest>>>, play_epoch: Arc<AtomicU64>) {
     let mut cached: Option<(ExportSettings, DecodeOptions, FrameRenderer)> = None;
 
     loop {
@@ -414,6 +427,12 @@ fn run_scrub_worker(pending: Arc<Mutex<Option<ScrubRequest>>>) {
             thread::sleep(Duration::from_millis(8));
             continue;
         };
+
+        // A `play()` call landed after this request was submitted — skip it entirely
+        // rather than decoding a frame nobody wants; playback owns the preview surface now.
+        if req.epoch != play_epoch.load(Ordering::SeqCst) {
+            continue;
+        }
 
         let needs_new = match &cached {
             Some((s, d, _)) => *s != req.settings || *d != req.decode_opts,
@@ -432,6 +451,12 @@ fn run_scrub_worker(pending: Arc<Mutex<Option<ScrubRequest>>>) {
         let (_, _, renderer) = cached.as_mut().expect("just populated above");
         match renderer.render(&req.project, req.time_secs) {
             Ok(pixels) => {
+                // Re-check: `render` above is a real decode, not instantaneous — `play()`
+                // can start while it was in flight. Presenting after that would overwrite
+                // a live playback frame with this now-stale scrub frame.
+                if req.epoch != play_epoch.load(Ordering::SeqCst) {
+                    continue;
+                }
                 let state = req.app.state::<crate::AppState>();
                 let result = state.preview.lock().present_rgba(
                     &pixels,

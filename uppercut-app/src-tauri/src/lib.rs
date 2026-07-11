@@ -199,6 +199,20 @@ fn ensure_preview_parent(app: &AppHandle, state: &AppState) -> Result<(), String
     Ok(())
 }
 
+/// Stops any active playback session, joining its worker thread from `spawn_blocking`
+/// rather than the calling async command's own worker thread. `PlaybackEngine::stop()`
+/// can block for as long as an in-flight audio premix takes (multi-second, on a long
+/// timeline) if called right after `play()` starts — running that wait inline in an async
+/// command handler stalls whichever tokio worker thread is executing it, and everything
+/// else queued behind that same worker.
+async fn stop_playback_blocking(app: &AppHandle) {
+    let app = app.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppState>().playback.stop();
+    })
+    .await;
+}
+
 fn default_projects_dir() -> Result<PathBuf, String> {
     let home = if cfg!(windows) {
         std::env::var("USERPROFILE")
@@ -214,7 +228,15 @@ async fn quick_start_project(app: AppHandle, state: State<'_, AppState>) -> Resu
     use uppercut_core::project::Settings;
 
     let _edit_guard = state.edit_lock.lock().await;
-    state.playback.stop();
+    stop_playback_blocking(&app).await;
+    // Checked before any session/file mutation below: on a failure here (guaranteed on
+    // non-Windows builds, possible transiently on Windows if the main window isn't ready
+    // yet), we must not have already written a project file or set `state.session` — the
+    // frontend sees this error and assumes no project is open, so the backend can't be
+    // left holding one anyway (or, on the create-project commands, a real file already
+    // sitting on disk that the project that "failed to open" never gets to reference).
+    ensure_preview_parent(&app, &state)?;
+
     let dir = default_projects_dir()?;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -247,7 +269,6 @@ async fn quick_start_project(app: AppHandle, state: State<'_, AppState>) -> Resu
         project,
     });
     state.history.lock().clear();
-    ensure_preview_parent(&app, &state)?;
     state.emit_project_changed(&app);
     Ok(path_buf.to_string_lossy().into_owned())
 }
@@ -262,7 +283,9 @@ async fn new_project(
     use uppercut_core::project::Settings;
 
     let _edit_guard = state.edit_lock.lock().await;
-    state.playback.stop();
+    stop_playback_blocking(&app).await;
+    ensure_preview_parent(&app, &state)?;
+
     let path_buf = PathBuf::from(&path);
     let project = Project::new(
         name,
@@ -289,7 +312,6 @@ async fn new_project(
         project,
     });
     state.history.lock().clear();
-    ensure_preview_parent(&app, &state)?;
     state.emit_project_changed(&app);
     Ok(())
 }
@@ -301,7 +323,9 @@ async fn open_project(
     path: String,
 ) -> Result<(), String> {
     let _edit_guard = state.edit_lock.lock().await;
-    state.playback.stop();
+    stop_playback_blocking(&app).await;
+    ensure_preview_parent(&app, &state)?;
+
     let path_buf = PathBuf::from(&path);
     let read_path = path_buf.clone();
     let project: Project =
@@ -317,7 +341,6 @@ async fn open_project(
         project,
     });
     state.history.lock().clear();
-    ensure_preview_parent(&app, &state)?;
     state.emit_project_changed(&app);
     Ok(())
 }
@@ -550,10 +573,15 @@ async fn play(app: AppHandle, state: State<'_, AppState>, time_secs: f64) -> Res
     Ok(())
 }
 
-/// Stop playback and return the time to resume from.
+/// Stop playback and return the time to resume from. Joins the playback thread from
+/// `spawn_blocking` rather than inline — see `stop_playback_blocking`'s doc comment; the
+/// same in-flight-premix blocking risk applies here since `pause()` can be called the
+/// instant after `play()` starts.
 #[tauri::command]
-async fn pause(state: State<'_, AppState>) -> Result<f64, String> {
-    Ok(state.playback.pause())
+async fn pause(app: AppHandle) -> Result<f64, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppState>().playback.pause())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Jump the playhead to `time_secs`. While playing, this coalesces into the running

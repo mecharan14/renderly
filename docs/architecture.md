@@ -171,7 +171,19 @@ The fix has two parts:
     `scrub_audio` calls. Requests are coalesced the same way (one-slot, latest wins) and
     the worker caches its own `FrameRenderer`, rebuilding it only when the requested
     output settings actually change — so repeated scrub calls during a timeline drag
-    reuse the same wgpu device instead of recreating one per call.
+    reuse the same wgpu device instead of recreating one per call. Each request carries
+    the `PlaybackEngine`'s `play_epoch` (bumped once per `play()` call) captured at
+    submission time; the worker re-checks it against the current epoch both before
+    starting the render and again right before presenting, skipping the frame if a `play()`
+    landed in between — otherwise a scrub queued just before the user hits Play can finish
+    its (non-instantaneous, real-decode) render *after* playback has already started
+    presenting live frames, overwriting one with stale content for a frame interval.
+  - `pause()`/`stop()` join the play-session worker thread, which can block for as long as
+    an in-flight audio pre-mix takes (multi-second, on a long timeline) if called right
+    after `play()` starts — that join runs inside `spawn_blocking`, not inline in the
+    async command handler, so it can't stall the tokio worker pool behind it (it does not
+    make the *join itself* faster — that would need the pre-mix to be cancellable, a
+    bigger change not yet done).
 - The frontend never advances the playhead itself. The old `setInterval` loop is gone;
   `main.ts` only listens for `playback:tick`/`playback:state` and reflects `time_secs`
   into the timeline UI.
