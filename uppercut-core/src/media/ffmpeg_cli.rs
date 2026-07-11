@@ -163,6 +163,20 @@ fn parse_rational(s: &str) -> Result<f64, FfmpegCliError> {
     }
 }
 
+/// Continuously drains a child process's stderr pipe on a background thread for the life
+/// of the process, discarding the bytes. `VideoReader`/`VideoEncoder` pipe stderr *and*
+/// separately block synchronously reading stdout / writing stdin — an unread stderr pipe
+/// fills its OS buffer once ffmpeg writes enough (a handful of KB of warnings is plenty),
+/// at which point ffmpeg blocks trying to write more, while we're blocked reading/writing
+/// the other pipe, deadlocking the whole decode/encode. Draining it independently makes
+/// that structurally impossible.
+fn drain_stderr(stderr: std::process::ChildStderr) {
+    std::thread::spawn(move || {
+        let mut sink = Vec::new();
+        let _ = BufReader::new(stderr).read_to_end(&mut sink);
+    });
+}
+
 #[derive(Debug, Clone)]
 pub struct RgbaFrame {
     pub width: u32,
@@ -259,6 +273,10 @@ impl VideoReader {
             message: e.to_string(),
         })?;
 
+        if let Some(stderr) = child.stderr.take() {
+            drain_stderr(stderr);
+        }
+
         let stdout = child
             .stdout
             .take()
@@ -316,7 +334,7 @@ impl VideoEncoder {
         height: u32,
         fps: f64,
     ) -> Result<Self, FfmpegCliError> {
-        let child = Command::new(ffmpeg_path()?)
+        let mut child = Command::new(ffmpeg_path()?)
             .args([
                 "-hide_banner",
                 "-loglevel",
@@ -349,6 +367,10 @@ impl VideoEncoder {
                 tool: "ffmpeg",
                 message: e.to_string(),
             })?;
+
+        if let Some(stderr) = child.stderr.take() {
+            drain_stderr(stderr);
+        }
 
         Ok(Self {
             child,

@@ -58,7 +58,7 @@ impl ExportSettings {
 }
 
 struct ActiveLayer {
-    media_id: uuid::Uuid,
+    track_id: uuid::Uuid,
     path: PathBuf,
     source_time: f64,
 }
@@ -147,10 +147,21 @@ impl FrameRenderer {
             output_fps: self.decode_opts.output_fps,
         };
         for layer in &layers {
+            // Keyed by `track_id`, not `media_id`: two tracks can legitimately show the
+            // same underlying media at once (a minimal picture-in-picture setup), and each
+            // needs its own decoder/ffmpeg process at its own source position — sharing one
+            // decoder keyed by media_id made the two layers fight over a single ffmpeg
+            // process's playback position instead of decoding independently.
             let decoder = self
                 .decoders
-                .entry(layer.media_id)
+                .entry(layer.track_id)
                 .or_insert_with(|| DecoderState::new(layer.path.clone(), reader_opts));
+            // A track's active clip can reference a different media item than the decoder
+            // currently open for this track_id (e.g. a cut to a different source clip on
+            // the same track) — force a fresh decoder rather than reading the wrong file.
+            if decoder.path != layer.path {
+                *decoder = DecoderState::new(layer.path.clone(), reader_opts);
+            }
             if let Some(frame) = decoder.frame_at(layer.source_time)? {
                 rgba_layers.push(frame);
             }
@@ -438,7 +449,7 @@ fn active_layers(project: &Project, t: f64) -> Result<Vec<ActiveLayer>, ExportEr
                 }
                 let source_time = v.source_in_secs + (t - start);
                 layers.push(ActiveLayer {
-                    media_id: v.media_id,
+                    track_id: track.id,
                     path: media.path.clone(),
                     source_time,
                 });
@@ -716,6 +727,66 @@ mod tests {
             .expect("render frame 1");
         assert_eq!(frame_a.len(), (320 * 240 * 4) as usize);
         assert_eq!(frame_b.len(), (320 * 240 * 4) as usize);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn frame_renderer_keys_decoders_by_track_not_media_for_pip() {
+        if !ffmpeg_available() {
+            eprintln!("skipping PIP decoder test: ffmpeg not on PATH");
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("uppercut-pip-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let video_path = dir.join("src.mp4");
+        generate_test_video(&video_path);
+
+        let mut project = Project::new("pip-test", Settings::default());
+        let media_id = uuid::Uuid::new_v4();
+        project.media.push(crate::project::MediaItem {
+            id: media_id,
+            path: video_path.clone(),
+            kind: MediaKind::Video,
+            duration_secs: Some(1.0),
+            width: Some(320),
+            height: Some(240),
+            fps: Some(30.0),
+        });
+
+        // Two video tracks both showing the SAME media at the same time — a minimal PIP
+        // setup. Before the fix, both layers shared one decoder keyed by media_id and
+        // fought over that single ffmpeg process's playback position.
+        for _ in 0..2 {
+            let mut track = crate::project::Track::new(TrackKind::Video, "V");
+            track.clips.push(Clip::Video(crate::project::MediaClip {
+                id: uuid::Uuid::new_v4(),
+                media_id,
+                position_secs: 0.0,
+                source_in_secs: 0.0,
+                source_out_secs: 1.0,
+                gain_db: 0.0,
+                enabled: true,
+                fade_in_secs: 0.0,
+                fade_out_secs: 0.0,
+            }));
+            project.tracks.push(track);
+        }
+
+        let settings = ExportSettings {
+            width: 320,
+            height: 240,
+            fps: 30.0,
+        };
+        let mut renderer = FrameRenderer::new(settings, DecodeOptions::default()).expect("new");
+        renderer.render(&project, 0.0).expect("render");
+
+        assert_eq!(
+            renderer.decoders.len(),
+            2,
+            "each PIP layer's track should get its own decoder, not share one keyed by media_id"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

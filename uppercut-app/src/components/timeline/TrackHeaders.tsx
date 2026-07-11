@@ -15,6 +15,14 @@ export function TrackHeaders({ containerRef }: { containerRef: RefObject<HTMLEle
   const [renameValue, setRenameValue] = useState("");
   const [menuOpen, setMenuOpen] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  // Enter/Escape both call `setRenaming(null)`, which unmounts the focused rename
+  // `<input>` — removing a focused DOM node fires a native blur, which React re-delivers
+  // as `onBlur` before the node is gone. Without this flag, that blur would re-invoke
+  // `commitRename` a second time after Enter (double-dispatching the same rename), or
+  // invoke it for the first time after Escape (silently committing the very edit Escape
+  // was supposed to discard). Set right before either explicit action, checked (and
+  // cleared) in `onBlur` so only a genuine "clicked elsewhere" blur commits.
+  const explicitRenameActionRef = useRef(false);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -38,10 +46,29 @@ export function TrackHeaders({ containerRef }: { containerRef: RefObject<HTMLEle
 
   const { trackH, laneTop } = trackLayout(height, project.tracks.length);
 
+  function startRename(track: Track) {
+    explicitRenameActionRef.current = false;
+    setRenaming(track.id);
+    setRenameValue(track.name);
+  }
+
   function commitRename(track: Track) {
+    explicitRenameActionRef.current = true;
     setRenaming(null);
     const trimmed = renameValue.trim();
     if (trimmed && trimmed !== track.name) void dispatch(renameTrack(track.id, trimmed));
+  }
+
+  function cancelRename() {
+    explicitRenameActionRef.current = true;
+    setRenaming(null);
+  }
+
+  function onRenameBlur(track: Track) {
+    // A genuine "user clicked elsewhere" blur, not the unmount-triggered one that follows
+    // Enter/Escape — commit like leaving any other text field.
+    if (explicitRenameActionRef.current) return;
+    commitRename(track);
   }
 
   return (
@@ -57,20 +84,17 @@ export function TrackHeaders({ containerRef }: { containerRef: RefObject<HTMLEle
               className="track-header-rename"
               value={renameValue}
               onChange={(e) => setRenameValue(e.target.value)}
-              onBlur={() => commitRename(track)}
+              onBlur={() => onRenameBlur(track)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") commitRename(track);
-                if (e.key === "Escape") setRenaming(null);
+                if (e.key === "Escape") cancelRename();
               }}
             />
           ) : (
             <span
               className={`track-header-name${track.hidden || track.muted ? " dimmed" : ""}`}
               title="Double-click to rename"
-              onDoubleClick={() => {
-                setRenaming(track.id);
-                setRenameValue(track.name);
-              }}
+              onDoubleClick={() => startRename(track)}
             >
               {track.name}
             </span>
