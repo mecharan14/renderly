@@ -15,9 +15,15 @@ export interface TimelineTheme {
   text2: string;
   text3: string;
   clipVideoBg: string;
+  clipVideoEdge: string;
   clipAudioBg: string;
+  clipAudioEdge: string;
   clipAudioWave: string;
   clipCaptionBg: string;
+  clipCaptionEdge: string;
+  clipLabelBg: string;
+  clipLabelText: string;
+  laneStripe: string;
   clipBorderSelected: string;
   clipShadow: string;
   playhead: string;
@@ -49,9 +55,15 @@ export function getTimelineTheme(): TimelineTheme {
     text2: cssVar(styles, "--text-2"),
     text3: cssVar(styles, "--text-3"),
     clipVideoBg: cssVar(styles, "--clip-video-bg"),
+    clipVideoEdge: cssVar(styles, "--clip-video-edge"),
     clipAudioBg: cssVar(styles, "--clip-audio-bg"),
+    clipAudioEdge: cssVar(styles, "--clip-audio-edge"),
     clipAudioWave: cssVar(styles, "--clip-audio-wave"),
     clipCaptionBg: cssVar(styles, "--clip-caption-bg"),
+    clipCaptionEdge: cssVar(styles, "--clip-caption-edge"),
+    clipLabelBg: cssVar(styles, "--clip-label-bg"),
+    clipLabelText: cssVar(styles, "--clip-label-text"),
+    laneStripe: cssVar(styles, "--lane-stripe"),
     clipBorderSelected: cssVar(styles, "--clip-border-selected"),
     clipShadow: cssVar(styles, "--clip-shadow"),
     playhead: cssVar(styles, "--playhead"),

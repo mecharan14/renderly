@@ -3,12 +3,14 @@ import { setClipTransform } from "../../lib/commands";
 import * as ipc from "../../lib/ipc";
 import {
   applyHandleDrag,
+  cursorForHandle,
   hitTestHandle,
   ndcToPx,
   pxToNdc,
   resolveTransform,
   rotationHandleNdc,
   transformedCorners,
+  type DragMods,
   type HandleKind,
 } from "../../lib/previewMath";
 import type { ClipTransform, MediaClip } from "../../lib/types";
@@ -17,10 +19,7 @@ import { useEditorStore } from "../../store/editorStore";
 
 type ContentBounds = { left: number; top: number; width: number; height: number };
 
-function contentBoundsInHost(
-  host: HTMLElement,
-  aspect: number,
-): ContentBounds | null {
+function contentBoundsInHost(host: HTMLElement, aspect: number): ContentBounds | null {
   const rect = host.getBoundingClientRect();
   if (rect.width < 2 || rect.height < 2) return null;
   const hostAspect = rect.width / rect.height;
@@ -55,11 +54,7 @@ function activeVideoSelection(
   return { trackId: track.id, clip, locked: track.locked };
 }
 
-function patchClipTransform(
-  trackId: string,
-  clipId: string,
-  transform: ClipTransform,
-) {
+function patchClipTransform(trackId: string, clipId: string, transform: ClipTransform) {
   const project = useEditorStore.getState().project;
   if (!project) return;
   useEditorStore.setState({
@@ -86,7 +81,29 @@ type DragRef = {
   startTransform: ClipTransform;
   startNdc: { x: number; y: number };
   lastPreviewMs: number;
+  moved: boolean;
 };
+
+type Guides = { v: boolean; h: boolean };
+
+function readoutText(
+  kind: HandleKind,
+  t: ClipTransform,
+  projW: number,
+  projH: number,
+): string {
+  if (kind === "move") {
+    const px = Math.round((t.x * projW) / 2);
+    const py = Math.round((-t.y * projH) / 2);
+    return `x ${px >= 0 ? "+" : ""}${px}  y ${py >= 0 ? "+" : ""}${py}`;
+  }
+  if (kind === "rotate") {
+    return `${t.rotation_deg.toFixed(1).replace(/\.0$/, "")}°`;
+  }
+  const sx = Math.round(t.scale_x * 100);
+  const sy = Math.round(t.scale_y * 100);
+  return sx === sy ? `${sx}%` : `${sx}% × ${sy}%`;
+}
 
 export function PreviewHandlesOverlay({
   hostRef,
@@ -104,6 +121,9 @@ export function PreviewHandlesOverlay({
   const setDragging = useEditorStore((s) => s.setDragging);
 
   const [bounds, setBounds] = useState<ContentBounds | null>(null);
+  const [guides, setGuides] = useState<Guides>({ v: false, h: false });
+  const [readout, setReadout] = useState<string | null>(null);
+  const [cursor, setCursor] = useState<string>("default");
   const dragRef = useRef<DragRef | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
 
@@ -114,6 +134,8 @@ export function PreviewHandlesOverlay({
   }, [playhead, playing, project, selection, toolMode]);
 
   const transform = resolveTransform(active?.clip.transform);
+  const projW = project?.settings.width ?? 1920;
+  const projH = project?.settings.height ?? 1080;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -136,6 +158,36 @@ export function PreviewHandlesOverlay({
     [],
   );
 
+  const endDrag = useCallback(
+    (cancel: boolean) => {
+      const drag = dragRef.current;
+      if (!drag) return;
+      dragRef.current = null;
+      setDragging(false);
+      setGuides({ v: false, h: false });
+      setReadout(null);
+      if (cancel || !drag.moved) {
+        // Restore the pre-drag state; nothing to commit.
+        patchClipTransform(drag.trackId, drag.clipId, drag.startTransform);
+        void ipc.previewTransformOverride(
+          drag.trackId,
+          drag.clipId,
+          drag.startTransform,
+          useEditorStore.getState().playhead,
+        );
+        return;
+      }
+      const projectNow = useEditorStore.getState().project;
+      const clip = projectNow?.tracks
+        .find((t) => t.id === drag.trackId)
+        ?.clips.find((c) => c.id === drag.clipId);
+      const t =
+        clip && clip.type !== "caption" ? resolveTransform(clip.transform) : drag.startTransform;
+      void dispatch(setClipTransform(drag.trackId, drag.clipId, t));
+    },
+    [dispatch, setDragging],
+  );
+
   useEffect(() => {
     const onMove = (ev: MouseEvent) => {
       const drag = dragRef.current;
@@ -144,42 +196,64 @@ export function PreviewHandlesOverlay({
       const rect = overlay.getBoundingClientRect();
       const local = { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
       const curNdc = pxToNdc(local, rect.width, rect.height);
-      const next = applyHandleDrag(drag.kind, drag.startTransform, drag.startNdc, curNdc);
-      patchClipTransform(drag.trackId, drag.clipId, next);
-      previewOverride(drag.trackId, drag.clipId, next);
+      const mods: DragMods = { shift: ev.shiftKey, alt: ev.altKey };
+      const outcome = applyHandleDrag(drag.kind, drag.startTransform, drag.startNdc, curNdc, mods);
+      drag.moved = true;
+      setGuides({ v: outcome.guideV, h: outcome.guideH });
+      setReadout(readoutText(drag.kind, outcome.transform, projW, projH));
+      patchClipTransform(drag.trackId, drag.clipId, outcome.transform);
+      previewOverride(drag.trackId, drag.clipId, outcome.transform);
     };
 
-    const onUp = async () => {
-      const drag = dragRef.current;
-      if (!drag) return;
-      dragRef.current = null;
-      setDragging(false);
-      const projectNow = useEditorStore.getState().project;
-      const clip = projectNow?.tracks
-        .find((t) => t.id === drag.trackId)
-        ?.clips.find((c) => c.id === drag.clipId);
-      const t =
-        clip && clip.type !== "caption"
-          ? resolveTransform(clip.transform)
-          : drag.startTransform;
-      await dispatch(setClipTransform(drag.trackId, drag.clipId, t));
+    const onUp = () => endDrag(false);
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape" && dragRef.current) {
+        ev.stopPropagation();
+        endDrag(true);
+      }
     };
 
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
+    window.addEventListener("keydown", onKey, true);
     return () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("keydown", onKey, true);
     };
-  }, [dispatch, previewOverride, setDragging]);
+  }, [endDrag, previewOverride, projW, projH]);
 
   if (!active || !bounds || active.locked || bounds.width < 8) return null;
 
   const w = bounds.width;
   const h = bounds.height;
   const corners = transformedCorners(transform).map((c) => ndcToPx(c, w, h));
+  const centerPx = ndcToPx({ x: transform.x, y: transform.y }, w, h);
   const rot = ndcToPx(rotationHandleNdc(transform), w, h);
   const poly = corners.map((c) => `${c.x},${c.y}`).join(" ");
+  // Screen-space rotation (NDC +Y up flips sign when projected to pixels).
+  const svgAngle = -transform.rotation_deg;
+
+  const mid = (a: { x: number; y: number }, b: { x: number; y: number }) => ({
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2,
+  });
+  const edgeHandles: { kind: HandleKind; p: { x: number; y: number }; along: number }[] = [
+    { kind: "scale-s", p: mid(corners[0], corners[1]), along: svgAngle },
+    { kind: "scale-e", p: mid(corners[1], corners[2]), along: svgAngle + 90 },
+    { kind: "scale-n", p: mid(corners[2], corners[3]), along: svgAngle },
+    { kind: "scale-w", p: mid(corners[3], corners[0]), along: svgAngle + 90 },
+  ];
+
+  const hoverHitTest = (ev: React.MouseEvent) => {
+    if (dragRef.current) return;
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const rect = overlay.getBoundingClientRect();
+    const local = { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+    const kind = hitTestHandle(local, transform, w, h);
+    setCursor(kind ? cursorForHandle(kind, local, centerPx) : "default");
+  };
 
   const onMouseDown = (ev: React.MouseEvent) => {
     if (ev.button !== 0 || active.locked) return;
@@ -192,6 +266,7 @@ export function PreviewHandlesOverlay({
     ev.preventDefault();
     ev.stopPropagation();
     setDragging(true);
+    setCursor(kind === "rotate" ? "grabbing" : cursorForHandle(kind, local, centerPx));
     dragRef.current = {
       kind,
       trackId: active.trackId,
@@ -199,8 +274,12 @@ export function PreviewHandlesOverlay({
       startTransform: { ...transform },
       startNdc: pxToNdc(local, w, h),
       lastPreviewMs: 0,
+      moved: false,
     };
   };
+
+  // Anchor the readout above the box's topmost corner.
+  const topY = Math.min(...corners.map((c) => c.y));
 
   return (
     <div
@@ -211,10 +290,15 @@ export function PreviewHandlesOverlay({
         top: bounds.top,
         width: bounds.width,
         height: bounds.height,
+        cursor,
       }}
       onMouseDown={onMouseDown}
+      onMouseMove={hoverHitTest}
+      onMouseLeave={() => !dragRef.current && setCursor("default")}
     >
       <svg className="preview-handles-svg" width={w} height={h}>
+        {guides.v && <line x1={w / 2} y1={0} x2={w / 2} y2={h} className="preview-guide" />}
+        {guides.h && <line x1={0} y1={h / 2} x2={w} y2={h / 2} className="preview-guide" />}
         <polygon points={poly} className="preview-handle-box" />
         <line
           x1={(corners[2].x + corners[3].x) / 2}
@@ -223,11 +307,46 @@ export function PreviewHandlesOverlay({
           y2={rot.y}
           className="preview-handle-rot-line"
         />
-        {corners.map((c, i) => (
-          <circle key={i} cx={c.x} cy={c.y} r={5} className="preview-handle-knob" />
+        {edgeHandles.map((e) => (
+          <rect
+            key={e.kind}
+            x={e.p.x - 8}
+            y={e.p.y - 3}
+            width={16}
+            height={6}
+            rx={3}
+            className="preview-handle-edge"
+            transform={`rotate(${e.along} ${e.p.x} ${e.p.y})`}
+          />
         ))}
-        <circle cx={rot.x} cy={rot.y} r={5} className="preview-handle-knob rotate" />
+        {corners.map((c, i) => (
+          <rect
+            key={i}
+            x={c.x - 5}
+            y={c.y - 5}
+            width={10}
+            height={10}
+            rx={2.5}
+            className="preview-handle-knob"
+            transform={`rotate(${svgAngle} ${c.x} ${c.y})`}
+          />
+        ))}
+        <g className="preview-handle-rotate" transform={`translate(${rot.x} ${rot.y})`}>
+          <circle r={7} className="preview-handle-knob rotate" />
+          <path
+            d="M -3 0.5 A 3 3 0 1 1 0.5 3 M 0.5 3 l -1.8 -0.4 M 0.5 3 l 0.5 -1.8"
+            className="preview-handle-rotate-glyph"
+          />
+        </g>
       </svg>
+      {readout && (
+        <div
+          className="preview-readout"
+          style={{ left: centerPx.x, top: Math.max(14, topY - 16) }}
+        >
+          {readout}
+        </div>
+      )}
     </div>
   );
 }

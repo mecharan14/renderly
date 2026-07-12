@@ -61,7 +61,27 @@
   --track-label-w: 88px;
   --ruler-h: 24px;
   --timeline-h: 220px;
-  --titlebar-h: 40px;
+  --titlebar-h: 44px;
+
+  /* Fixed dark "stage" palette (approved redesign): the preview column and timeline
+   * chrome re-pin their semantic tokens to these in BOTH themes, so footage and clips
+   * always sit on near-black. Keep every literal here, not in globals.css. */
+  --stage-bg-0: hsl(223 18% 5%);
+  --stage-bg-1: hsl(221 16% 10%);
+  --stage-bg-2: hsl(220 14% 12%);
+  --stage-bg-3: hsl(220 14% 16%);
+  --stage-border: hsl(220 12% 17%);
+  --stage-border-strong: hsl(220 10% 30%);
+  --stage-text-1: hsl(220 20% 94%);
+  --stage-text-2: hsl(220 10% 62%);
+  --stage-text-3: hsl(220 8% 45%);
+  --stage-accent: hsl(215 90% 58%);
+  --stage-accent-hover: hsl(215 90% 64%);
+  --stage-accent-soft: hsl(215 90% 58% / 0.14);
+  --stage-on-accent: hsl(222 30% 8%);
+
+  /* Brand mark gradient (topbar + home). */
+  --brand-gradient: linear-gradient(135deg, hsl(215 90% 58%), hsl(255 80% 62%));
 }
 
 /* —— Dark (default) —— */
@@ -80,10 +100,11 @@
   --text-2: var(--neutral-400);
   --text-3: var(--neutral-500);
 
-  --accent: var(--accent-500);
-  --accent-hover: var(--accent-400);
+  /* Approved redesign: brighter electric accent on dark grounds. */
+  --accent: hsl(215 90% 58%);
+  --accent-hover: hsl(215 90% 64%);
   --accent-active: var(--accent-600);
-  --accent-soft: hsl(215 85% 55% / 0.16);
+  --accent-soft: hsl(215 90% 58% / 0.14);
   --on-accent: var(--neutral-950);
 
   --danger: var(--danger-500);
@@ -94,10 +115,16 @@
   --muted: var(--neutral-500);
   --destructive: var(--danger-500);
 
-  --clip-video-bg: hsl(220 22% 16%);
-  --clip-audio-bg: hsl(160 14% 14%);
-  --clip-audio-wave: hsl(168 60% 60%);
-  --clip-caption-bg: hsl(265 28% 22%);
+  --clip-video-bg: hsl(228 22% 20%);
+  --clip-video-edge: hsl(228 24% 30%);
+  --clip-audio-bg: hsl(168 32% 15%);
+  --clip-audio-edge: hsl(168 40% 26%);
+  --clip-audio-wave: hsl(168 55% 52%);
+  --clip-caption-bg: hsl(262 30% 22%);
+  --clip-caption-edge: hsl(262 38% 40%);
+  --clip-label-bg: hsl(222 25% 8% / 0.55);
+  --clip-label-text: hsl(220 30% 96%);
+  --lane-stripe: hsl(0 0% 100% / 0.025);
   --clip-border-selected: var(--accent);
 
   --playhead: var(--neutral-50);
@@ -131,10 +158,10 @@
   --text-2: var(--neutral-600);
   --text-3: var(--neutral-500);
 
-  --accent: var(--accent-600);
+  --accent: hsl(215 85% 48%);
   --accent-hover: var(--accent-500);
   --accent-active: var(--accent-700);
-  --accent-soft: hsl(215 80% 46% / 0.12);
+  --accent-soft: hsl(215 85% 48% / 0.1);
   --on-accent: var(--neutral-50);
 
   --danger: var(--danger-600);
@@ -145,10 +172,16 @@
   --muted: var(--neutral-500);
   --destructive: var(--danger-600);
 
-  --clip-video-bg: hsl(220 18% 22%);
-  --clip-audio-bg: hsl(160 12% 20%);
+  --clip-video-bg: hsl(228 20% 24%);
+  --clip-video-edge: hsl(228 22% 34%);
+  --clip-audio-bg: hsl(168 28% 18%);
+  --clip-audio-edge: hsl(168 36% 30%);
   --clip-audio-wave: hsl(168 50% 55%);
-  --clip-caption-bg: hsl(265 22% 28%);
+  --clip-caption-bg: hsl(262 26% 26%);
+  --clip-caption-edge: hsl(262 34% 44%);
+  --clip-label-bg: hsl(222 25% 8% / 0.55);
+  --clip-label-text: hsl(220 30% 96%);
+  --lane-stripe: hsl(0 0% 100% / 0.03);
   --clip-border-selected: var(--accent-400);
 
   --playhead: hsl(220 20% 98%);

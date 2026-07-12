@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Play, Pause, ChevronLeft, ChevronRight, Maximize2, Minimize2 } from "lucide-react";
+import { Play, Pause, SkipBack, SkipForward, Maximize2, Minimize2 } from "lucide-react";
 import { useEditorStore } from "../../store/editorStore";
 import { formatTimecode, parseTimecode } from "../../lib/format";
 import { timelineDuration } from "../../timeline/layout";
@@ -43,7 +43,7 @@ export function TransportBar({
   return (
     <div className="transport-bar">
       <IconButton
-        icon={ChevronLeft}
+        icon={SkipBack}
         iconOnly
         className="transport-step"
         tooltip="Previous frame (←)"
@@ -57,11 +57,15 @@ export function TransportBar({
           disabled={!project}
           onClick={() => (playing ? stopPlayback() : void startPlayback())}
         >
-          {playing ? <Pause size={18} strokeWidth={1.75} /> : <Play size={18} strokeWidth={1.75} />}
+          {playing ? (
+            <Pause size={18} strokeWidth={0} fill="currentColor" />
+          ) : (
+            <Play size={18} strokeWidth={0} fill="currentColor" style={{ marginLeft: 2 }} />
+          )}
         </button>
       </Tooltip>
       <IconButton
-        icon={ChevronRight}
+        icon={SkipForward}
         iconOnly
         className="transport-step"
         tooltip="Next frame (→)"

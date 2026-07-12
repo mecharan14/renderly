@@ -15,6 +15,10 @@ export const RULER_H = 24;
 export const TRACK_H = 48;
 export const TRACK_GAP = 6;
 export const CONTENT_PAD_X = 8;
+/// Clip card insets within the lane (approved redesign: labels live inside the card, so
+/// the card fills most of the lane). Shared by renderer.ts drawing and hit-testing here.
+export const CLIP_TOP_PAD = 6;
+export const CLIP_BOTTOM_PAD = 4;
 
 export function clipLeft(secs: number, pxPerSec: number, scrollX = 0): number {
   return TRACK_LABEL_W + CONTENT_PAD_X + secs * pxPerSec - scrollX;
@@ -108,7 +112,7 @@ export function hitTestClip(
     for (const clip of track.clips) {
       const cx = clipLeft(clip.position_secs, pxPerSec, scrollX);
       const cw = clipDurationSecs(clip) * pxPerSec;
-      if (y < y0 + 18 || x < cx || x > cx + cw) continue;
+      if (y < y0 + CLIP_TOP_PAD || x < cx || x > cx + cw) continue;
       if (x <= cx + TRIM_HANDLE_PX) return { trackId: track.id, clip, trackIndex: ti, edge: "left" };
       if (x >= cx + cw - TRIM_HANDLE_PX) {
         return { trackId: track.id, clip, trackIndex: ti, edge: "right" };
@@ -160,8 +164,8 @@ export function listTransitionJunctions(
     const track = project.tracks[ti];
     if (track.kind !== "video") continue;
     const y = laneTop(ti);
-    const bodyY = y + 18;
-    const bodyH = trackH - 22;
+    const bodyY = y + CLIP_TOP_PAD;
+    const bodyH = trackH - CLIP_TOP_PAD - CLIP_BOTTOM_PAD;
 
     const videos = [...track.clips]
       .filter((c): c is MediaClip => c.type === "video")

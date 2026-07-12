@@ -7,6 +7,39 @@
       "runtimeArgs": ["run", "dev"],
       "cwd": "renderly-app",
       "port": 1420
+    },
+    {
+      "name": "harness",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vite", "--config", "vite.harness.config.ts", "--port", "5188"],
+      "cwd": "renderly-app",
+      "port": 5188
+    },
+    {
+      "name": "mockup",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "-y",
+        "http-server",
+        "C:\\Users\\ADMIN\\AppData\\Local\\Temp\\claude\\D--Projects-video-editor\\f7e2739b-334f-4a86-8a16-60ae6e967bb9\\scratchpad\\mockup-serve",
+        "-p",
+        "5199",
+        "-c-1"
+      ],
+      "port": 5199
+    },
+    {
+      "name": "preview-spike",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "-y",
+        "http-server",
+        "C:\\Users\\ADMIN\\AppData\\Local\\Temp\\claude\\D--Projects-video-editor\\f7e2739b-334f-4a86-8a16-60ae6e967bb9\\scratchpad\\preview-spike",
+        "-p",
+        "5199",
+        "-c-1"
+      ],
+      "port": 5199
     }
   ]
 }

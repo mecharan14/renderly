@@ -3,6 +3,7 @@ import { useEditorStore } from "../../store/editorStore";
 import { TimelineToolbar } from "./TimelineToolbar";
 import { TimelineCanvas } from "./TimelineCanvas";
 import { TrackHeaders } from "./TrackHeaders";
+import { TimelineScrollbars } from "./TimelineScrollbars";
 
 export function TimelineSection() {
   const canvasWrapRef = useRef<HTMLDivElement | null>(null);
@@ -15,6 +16,7 @@ export function TimelineSection() {
       <div className="timeline-canvas-wrap" ref={canvasWrapRef}>
         <TimelineCanvas />
         <TrackHeaders containerRef={canvasWrapRef} />
+        <TimelineScrollbars containerRef={canvasWrapRef} />
         {project && !hasClips && (
           <div className="timeline-empty" aria-live="polite">
             <strong>Timeline is empty</strong>

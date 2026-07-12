@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Film, Music, Plus } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Film, Music, Plus, Search } from "lucide-react";
 import { useEditorStore, type ThumbnailAsset } from "../../store/editorStore";
 import { fileName } from "../../lib/format";
 import { pickAndImportMedia, importFromPath } from "../../lib/projectFlows";
@@ -31,8 +31,12 @@ function FilmstripThumb({ thumb, durationSecs }: { thumb: ThumbnailAsset; durati
       onMouseLeave={() => setHoverFrac(null)}
       style={{
         backgroundImage: `url(${thumb.stripUrl})`,
-        backgroundPosition: `-${col * thumb.tileWidth}px -${row * thumb.tileHeight}px`,
-        backgroundSize: `${thumb.cols * thumb.tileWidth}px ${thumb.rows * thumb.tileHeight}px`,
+        // Percentage-based so one strip tile always fills the card exactly, whatever the
+        // card's rendered size (the bin is now a fluid grid, not fixed 36px squares).
+        backgroundPosition: `${thumb.cols > 1 ? (col / (thumb.cols - 1)) * 100 : 0}% ${
+          thumb.rows > 1 ? (row / (thumb.rows - 1)) * 100 : 0
+        }%`,
+        backgroundSize: `${thumb.cols * 100}% ${thumb.rows * 100}%`,
       }}
     />
   );
@@ -74,18 +78,68 @@ function mediaMetaLine(item: {
   return parts.join(" · ");
 }
 
+const KIND_FILTERS = [
+  { id: "all", label: "All" },
+  { id: "video", label: "Video" },
+  { id: "audio", label: "Audio" },
+  { id: "image", label: "Image" },
+] as const;
+type KindFilter = (typeof KIND_FILTERS)[number]["id"];
+
 export function MediaPanel() {
   const project = useEditorStore((s) => s.project);
   const mediaAssets = useEditorStore((s) => s.mediaAssets);
   const placeMediaOnTimeline = useEditorStore((s) => s.placeMediaOnTimeline);
   const [dragOver, setDragOver] = useState(false);
+  const [query, setQuery] = useState("");
+  const [kind, setKind] = useState<KindFilter>("all");
 
   // G4: show all asset kinds in the bin (audio used to be filtered out).
-  const items = project?.media ?? [];
-  const emptyProject = items.length === 0;
+  const allItems = project?.media ?? [];
+  const emptyProject = allItems.length === 0;
+  const items = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return allItems.filter(
+      (m) =>
+        (kind === "all" || m.kind === kind) &&
+        (q === "" || fileName(m.path).toLowerCase().includes(q)),
+    );
+  }, [allItems, kind, query]);
+  const counts = useMemo(() => {
+    const c: Record<string, number> = { all: allItems.length, video: 0, audio: 0, image: 0 };
+    for (const m of allItems) c[m.kind] = (c[m.kind] ?? 0) + 1;
+    return c;
+  }, [allItems]);
 
   return (
-    <div className={`panel-body${emptyProject ? " media-import-first" : ""}`}>
+    <div className={`panel-body media-bin${emptyProject ? " media-import-first" : ""}`}>
+      {!emptyProject && (
+        <div className="media-toolbar">
+          <div className="media-search">
+            <Search size={13} strokeWidth={2} />
+            <input
+              type="text"
+              placeholder="Search media"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </div>
+          <div className="media-chips">
+            {KIND_FILTERS.map((f) => (
+              <button
+                key={f.id}
+                type="button"
+                className={`chip${kind === f.id ? " on" : ""}`}
+                onClick={() => setKind(f.id)}
+              >
+                {f.label}
+                {counts[f.id] ? <span className="chip-count">{counts[f.id]}</span> : null}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div
         className={`drop-zone${dragOver ? " drag-over" : ""}${emptyProject ? " drop-zone-hero" : ""}`}
         onClick={() => void pickAndImportMedia()}
@@ -122,8 +176,13 @@ export function MediaPanel() {
           </p>
           <p className="empty-hint">Drop a file above or click the import area to browse.</p>
         </div>
+      ) : items.length === 0 ? (
+        <div className="empty-state">
+          <p className="empty-hint">No media matches your search.</p>
+        </div>
       ) : (
-        items.map((item) => {
+        <div className="media-grid">
+          {items.map((item) => {
           const thumb = mediaAssets[item.id]?.thumbnails;
           const waveform = mediaAssets[item.id]?.waveform;
           const pendingThumb = item.kind === "video" && !thumb;
@@ -172,8 +231,9 @@ export function MediaPanel() {
                 </span>
               </Tooltip>
             </div>
-          );
-        })
+            );
+          })}
+        </div>
       )}
     </div>
   );

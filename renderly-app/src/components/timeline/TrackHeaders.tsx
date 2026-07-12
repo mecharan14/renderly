@@ -84,7 +84,11 @@ export function TrackHeaders({ containerRef }: { containerRef: RefObject<HTMLEle
   return (
     <div className="track-headers" style={{ width: TRACK_LABEL_W }} ref={rootRef}>
       {project.tracks.map((track, i) => (
-        <div key={track.id} className="track-header-row" style={{ top: laneTop(i), height: trackH }}>
+        <div
+          key={track.id}
+          className={`track-header-row kind-${track.kind}`}
+          style={{ top: laneTop(i), height: trackH }}
+        >
           <span className="track-header-icon">
             <TrackKindIcon kind={track.kind} />
           </span>

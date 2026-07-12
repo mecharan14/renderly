@@ -1,8 +1,9 @@
-/** Theme bootstrap (improvement-plan D1).
+/** Theme bootstrap (improvement-plan D1; redesign approved 2026-07-12).
  *
- * Light theme ships behind a dev flag: set localStorage `renderly.theme` to
- * `"light"` | `"dark"` | `"system"`, or call `setTheme`. Default follows
- * `prefers-color-scheme`. Writes `data-theme` on `<html>` so CSS semantic tokens apply.
+ * Dark is the product default — a fresh install gets dark regardless of the OS setting
+ * (approved redesign decision). Users opt into `"light"` or `"system"` via the theme
+ * cycle action; the choice persists in localStorage `renderly.theme`. Writes
+ * `data-theme` on `<html>` so CSS semantic tokens apply.
  */
 
 export type ThemePreference = "light" | "dark" | "system";
@@ -17,7 +18,7 @@ function systemPrefersDark(): boolean {
 export function getThemePreference(): ThemePreference {
   const raw = localStorage.getItem(STORAGE_KEY);
   if (raw === "light" || raw === "dark" || raw === "system") return raw;
-  return "system";
+  return "dark";
 }
 
 export function resolveTheme(pref: ThemePreference = getThemePreference()): ResolvedTheme {

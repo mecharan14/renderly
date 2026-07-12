@@ -843,6 +843,12 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   },
 }));
 
+// Dev-only devtools handle (also used by the browser harness to drive state). No-op in
+// production builds' consumers; harmless if present.
+if ((import.meta as { env?: { DEV?: boolean } }).env?.DEV) {
+  (globalThis as unknown as { __store?: typeof useEditorStore }).__store = useEditorStore;
+}
+
 function errMsg(e: unknown): string {
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;

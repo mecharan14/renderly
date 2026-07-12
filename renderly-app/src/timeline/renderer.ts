@@ -6,6 +6,8 @@ import { fileName, formatTimecode } from "../lib/format";
 import { clipDurationSecs, type Project, type Selection, type Track } from "../lib/types";
 import {
   clipLeft,
+  CLIP_BOTTOM_PAD,
+  CLIP_TOP_PAD,
   listTransitionJunctions,
   RULER_H,
   secsFromCanvasX,
@@ -131,11 +133,63 @@ function roundRect(
   ctx.closePath();
 }
 
-function clipFillColor(kind: Track["kind"]): string {
+function clipColors(kind: Track["kind"]): { fill: string; edge: string } {
   const theme = getTimelineTheme();
-  if (kind === "video") return theme.clipVideoBg;
-  if (kind === "audio") return theme.clipAudioBg;
-  return theme.clipCaptionBg;
+  if (kind === "video") return { fill: theme.clipVideoBg, edge: theme.clipVideoEdge };
+  if (kind === "audio") return { fill: theme.clipAudioBg, edge: theme.clipAudioEdge };
+  return { fill: theme.clipCaptionBg, edge: theme.clipCaptionEdge };
+}
+
+const CLIP_RADIUS = 6;
+
+/// Name chip in the clip's top-left corner (approved redesign): translucent dark pill so
+/// the label stays readable over filmstrip thumbnails in both themes.
+function drawClipLabelChip(
+  ctx: CanvasRenderingContext2D,
+  label: string,
+  x: number,
+  cy: number,
+  cw: number,
+) {
+  if (cw <= 40 || !label) return;
+  const theme = getTimelineTheme();
+  ctx.save();
+  ctx.font = "600 10px var(--font-ui), Segoe UI, sans-serif";
+  const maxW = cw * 0.7 - 12;
+  let text = label;
+  while (text.length > 1 && ctx.measureText(text).width > maxW) text = text.slice(0, -1);
+  if (text !== label) text = `${text.slice(0, -1)}…`;
+  const tw = ctx.measureText(text).width;
+  ctx.fillStyle = theme.clipLabelBg;
+  roundRect(ctx, x + 5, cy + 4, tw + 12, 15, 3);
+  ctx.fill();
+  ctx.fillStyle = theme.clipLabelText;
+  ctx.fillText(text, x + 11, cy + 15);
+  ctx.restore();
+}
+
+/// Trim grips on the selected clip: accent tabs with a dark notch, rounded on the outer
+/// side to match the clip card's corner radius.
+function drawTrimGrips(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  cy: number,
+  cw: number,
+  ch: number,
+) {
+  const theme = getTimelineTheme();
+  const gw = 8;
+  ctx.save();
+  roundRect(ctx, x, cy, cw, ch, CLIP_RADIUS);
+  ctx.clip();
+  ctx.fillStyle = theme.clipBorderSelected;
+  ctx.fillRect(x, cy, gw, ch);
+  ctx.fillRect(x + cw - gw, cy, gw, ch);
+  ctx.fillStyle = theme.timelineBg;
+  const notchH = Math.min(14, ch - 8);
+  ctx.fillRect(x + gw / 2 - 1, cy + (ch - notchH) / 2, 2, notchH);
+  ctx.fillRect(x + cw - gw / 2 - 1, cy + (ch - notchH) / 2, 2, notchH);
+  ctx.restore();
 }
 
 /// Diagonal hatch overlay marking a locked track's lane — mouse edits are refused there
@@ -190,41 +244,40 @@ function drawTransitionJunctions(
       ctx.restore();
     }
 
-    const badgeW = 12;
-    const badgeH = 16;
-    const bx = j.junctionX - badgeW - 2;
-    const by = j.bodyY + (j.bodyH - badgeH) / 2;
-
     ctx.save();
     if (isTarget) {
       ctx.strokeStyle = targetColor;
       ctx.lineWidth = 2;
-      roundRect(ctx, bx - 3, by - 3, badgeW + 6, badgeH + 6, 4);
+      ctx.beginPath();
+      ctx.arc(j.junctionX, j.bodyY + j.bodyH / 2, 13, 0, Math.PI * 2);
       ctx.stroke();
     }
 
-    ctx.fillStyle = j.transition ? theme.accent : theme.text3;
-    ctx.globalAlpha = j.transition ? 0.95 : 0.55;
-    roundRect(ctx, bx, by, badgeW, badgeH, 3);
+    // Diamond badge centered on the junction (approved redesign): raised square rotated
+    // 45°, accent-bordered; half-filled when a transition is applied, hollow otherwise.
+    const cx = j.junctionX;
+    const cy = j.bodyY + j.bodyH / 2;
+    const r = 7;
+    ctx.translate(cx, cy);
+    ctx.rotate(Math.PI / 4);
+    ctx.fillStyle = theme.trackHeaderBg;
+    roundRect(ctx, -r, -r, r * 2, r * 2, 3);
     ctx.fill();
-    ctx.globalAlpha = 1;
-
-    // Chevron (two triangles meeting at the junction)
-    ctx.fillStyle = theme.timelineBg;
-    const cx = bx + badgeW / 2;
-    const cy = by + badgeH / 2;
-    ctx.beginPath();
-    ctx.moveTo(cx - 3, cy - 4);
-    ctx.lineTo(cx + 1, cy);
-    ctx.lineTo(cx - 3, cy + 4);
-    ctx.closePath();
-    ctx.fill();
-    ctx.beginPath();
-    ctx.moveTo(cx + 3, cy - 4);
-    ctx.lineTo(cx - 1, cy);
-    ctx.lineTo(cx + 3, cy + 4);
-    ctx.closePath();
-    ctx.fill();
+    ctx.strokeStyle = j.transition ? theme.accent : theme.text3;
+    ctx.lineWidth = 1.5;
+    ctx.globalAlpha = j.transition ? 1 : 0.65;
+    roundRect(ctx, -r, -r, r * 2, r * 2, 3);
+    ctx.stroke();
+    if (j.transition) {
+      ctx.globalAlpha = 0.7;
+      ctx.fillStyle = theme.accent;
+      ctx.beginPath();
+      ctx.moveTo(-r + 3, -r + 3);
+      ctx.lineTo(r - 3, -r + 3);
+      ctx.lineTo(-r + 3, r - 3);
+      ctx.closePath();
+      ctx.fill();
+    }
     ctx.restore();
   }
 }
@@ -246,8 +299,10 @@ function drawDragGhost(
 
   const { trackH, laneTop } = trackLayout(canvasH, Math.max(project.tracks.length, 1), scrollY);
   const isNewTrack = ghost.trackIndex >= project.tracks.length;
-  const y = isNewTrack ? laneTop(project.tracks.length) : laneTop(ghost.trackIndex) + 18;
-  const h = isNewTrack ? trackH : trackH - 22;
+  const y = isNewTrack
+    ? laneTop(project.tracks.length)
+    : laneTop(ghost.trackIndex) + CLIP_TOP_PAD;
+  const h = isNewTrack ? trackH : trackH - CLIP_TOP_PAD - CLIP_BOTTOM_PAD;
 
   if (isNewTrack) {
     ctx.save();
@@ -419,18 +474,23 @@ export function renderTimeline(canvas: HTMLCanvasElement, state: TimelineRenderS
     const x = clipLeft(t, pxPerSec, scrollX);
     if (x < TRACK_LABEL_W - 2 || x > w + 2) continue;
     const major = Math.abs(t % (step >= 1 ? 5 : 1)) < 1e-6 || Math.abs(t) < 1e-9;
+    // Approved redesign: lanes stay quiet — only major ticks continue below the ruler,
+    // and only as a barely-there stripe. Minor ticks live on the ruler alone.
+    if (major) {
+      ctx.strokeStyle = theme.laneStripe;
+      ctx.beginPath();
+      ctx.moveTo(x + 0.5, RULER_H);
+      ctx.lineTo(x + 0.5, h);
+      ctx.stroke();
+    }
     ctx.strokeStyle = major ? theme.rulerLineStrong : theme.rulerLineWeak;
-    ctx.beginPath();
-    ctx.moveTo(x + 0.5, RULER_H);
-    ctx.lineTo(x + 0.5, h);
-    ctx.stroke();
-    // Tick marks on the ruler
     ctx.beginPath();
     ctx.moveTo(x + 0.5, RULER_H - (major ? 10 : 5));
     ctx.lineTo(x + 0.5, RULER_H);
     ctx.stroke();
     if (major) {
       ctx.fillStyle = theme.rulerText;
+      ctx.font = "500 10px Consolas, var(--font-ui), monospace";
       ctx.fillText(formatTimecode(t).slice(0, 8), x + 4, 12);
     }
   }
@@ -445,65 +505,113 @@ export function renderTimeline(canvas: HTMLCanvasElement, state: TimelineRenderS
 
     ctx.fillStyle = theme.trackLaneBg;
     ctx.fillRect(TRACK_LABEL_W, y - 2, w - TRACK_LABEL_W, trackH + 4);
+    // Lane separator (approved redesign: rows read as rows).
+    ctx.strokeStyle = theme.border;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(TRACK_LABEL_W, y + trackH + 2.5);
+    ctx.lineTo(w, y + trackH + 2.5);
+    ctx.stroke();
 
     for (const clip of track.clips) {
       const x = clipLeft(clip.position_secs, pxPerSec, scrollX);
       const cw = Math.max(clipDurationSecs(clip) * pxPerSec, 8);
       if (x + cw < TRACK_LABEL_W || x > w) continue;
-      const cy = y + 18;
-      const ch = trackH - 22;
+      const cy = y + CLIP_TOP_PAD;
+      const ch = trackH - CLIP_TOP_PAD - CLIP_BOTTOM_PAD;
       const selected = isSelected(track.id, clip.id);
       const disabled = clip.type !== "caption" && !clip.enabled;
+      const colors = clipColors(track.kind);
 
-      ctx.fillStyle = clipFillColor(track.kind);
-      ctx.globalAlpha = disabled ? 0.4 : selected ? 1 : 0.92;
-      roundRect(ctx, x, cy, cw, ch, 5);
+      // Card: soft drop shadow, kind-colored fill, 1px edge stroke.
+      ctx.save();
+      ctx.globalAlpha = disabled ? 0.4 : 1;
+      ctx.shadowColor = theme.clipShadow;
+      ctx.shadowBlur = 6;
+      ctx.shadowOffsetY = 2;
+      ctx.fillStyle = colors.fill;
+      roundRect(ctx, x, cy, cw, ch, CLIP_RADIUS);
       ctx.fill();
-      ctx.globalAlpha = 1;
+      ctx.shadowBlur = 0;
+      ctx.shadowOffsetY = 0;
 
       if (clip.type === "video") {
         const thumb = state.mediaAssets?.[clip.media_id]?.thumbnails;
         if (thumb) {
+          ctx.save();
+          roundRect(ctx, x, cy, cw, ch, CLIP_RADIUS);
+          ctx.clip();
           drawVideoThumbnails(ctx, clip.source_in_secs, clip.source_out_secs, thumb, x, cy, cw, ch);
+          ctx.restore();
         }
       } else if (clip.type === "audio") {
         const waveform = state.mediaAssets?.[clip.media_id]?.waveform;
         if (waveform) {
+          ctx.save();
+          roundRect(ctx, x, cy, cw, ch, CLIP_RADIUS);
+          ctx.clip();
           drawWaveform(
             ctx,
             clip.source_in_secs,
             clip.source_out_secs,
             waveform,
             x,
-            cy,
+            cy + 3,
             cw,
-            ch,
+            ch - 6,
             theme.clipAudioWave,
           );
+          ctx.restore();
+        }
+      }
+
+      ctx.strokeStyle = colors.edge;
+      ctx.lineWidth = 1;
+      roundRect(ctx, x + 0.5, cy + 0.5, cw - 1, ch - 1, CLIP_RADIUS);
+      ctx.stroke();
+      ctx.restore();
+
+      if (clip.type === "caption") {
+        // Caption pill: text vertically centered, no chip.
+        ctx.save();
+        roundRect(ctx, x, cy, cw, ch, CLIP_RADIUS);
+        ctx.clip();
+        ctx.fillStyle = theme.clipLabelText;
+        ctx.font = "500 10.5px var(--font-ui), Segoe UI, sans-serif";
+        if (cw > 24) ctx.fillText(clip.text.slice(0, Math.floor(cw / 6)), x + 8, cy + ch / 2 + 3.5);
+        ctx.restore();
+      } else {
+        const label = fileName(
+          project.media.find((m) => m.id === clip.media_id)?.path ?? track.kind,
+        );
+        drawClipLabelChip(ctx, label, x, cy, cw);
+        // Duration, bottom-right, monospace.
+        if (cw > 64) {
+          ctx.save();
+          ctx.font = "500 9px Consolas, monospace";
+          ctx.fillStyle = theme.clipLabelText;
+          ctx.globalAlpha = 0.75;
+          const dur = `${clipDurationSecs(clip).toFixed(1)}s`;
+          ctx.fillText(dur, x + cw - ctx.measureText(dur).width - 6, cy + ch - 5);
+          ctx.restore();
         }
       }
 
       if (selected) {
+        // Accent border + soft glow, then trim grips.
+        ctx.save();
         ctx.strokeStyle = theme.clipBorderSelected;
-        ctx.lineWidth = 2;
-        roundRect(ctx, x, cy, cw, ch, 5);
+        ctx.globalAlpha = 0.22;
+        ctx.lineWidth = 5;
+        roundRect(ctx, x - 1, cy - 1, cw + 2, ch + 2, CLIP_RADIUS + 1);
         ctx.stroke();
-        // Trim handle affordances
-        ctx.fillStyle = theme.clipBorderSelected;
-        ctx.fillRect(x, cy, 3, ch);
-        ctx.fillRect(x + cw - 3, cy, 3, ch);
+        ctx.globalAlpha = 1;
+        ctx.lineWidth = 1.5;
+        roundRect(ctx, x, cy, cw, ch, CLIP_RADIUS);
+        ctx.stroke();
+        ctx.restore();
+        if (cw > 30) drawTrimGrips(ctx, x, cy, cw, ch);
       }
-
-      ctx.fillStyle = theme.text1;
-      ctx.font = "500 10px var(--font-ui), Segoe UI, sans-serif";
-      const label =
-        clip.type === "caption"
-          ? clip.text.slice(0, 20)
-          : fileName(project.media.find((m) => m.id === clip.media_id)?.path ?? track.kind).slice(
-              0,
-              16,
-            );
-      if (cw > 28) ctx.fillText(label, x + 6, y + trackH - 10);
     }
 
     if (track.locked) {

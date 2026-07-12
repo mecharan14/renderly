@@ -82,7 +82,11 @@ body {
 }
 
 .brand-mark-svg {
-  color: var(--accent);
+  color: var(--stage-text-1);
+  background: var(--brand-gradient);
+  border-radius: 5px;
+  padding: 3px;
+  box-sizing: content-box;
   flex-shrink: 0;
 }
 
@@ -426,13 +430,13 @@ body {
   justify-content: center;
   gap: 0.35rem;
   font: inherit;
-  font-size: var(--fs-13);
-  font-weight: 500;
-  border-radius: var(--radius-s);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  border-radius: var(--radius-m);
   border: 1px solid var(--border);
   background: var(--bg-2);
   color: var(--text-1);
-  padding: 0.4rem 0.7rem;
+  padding: 0.4rem 0.75rem;
   cursor: pointer;
   transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
 }
@@ -555,6 +559,37 @@ body {
   padding: var(--space-3);
 }
 
+/* Shared left-panel typography (approved redesign): every feature panel (effects,
+ * filters, transitions, stickers, text, audio, adjust, extensions) renders a direct
+ * `h3` title and `h4` sub-labels — give them a real hierarchy instead of raw browser
+ * headings. Scoped to `> h3` so the inspector's nested section headers keep their own. */
+.panel-body > h3 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--fs-15);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text-1);
+}
+
+/* The hint immediately under a panel title is a description, not an empty state — read it
+ * left-aligned as a subtitle, with a divider that gives each panel a real header. */
+.panel-body > h3 + .empty-hint {
+  text-align: left;
+  padding: 0 0 var(--space-3);
+  margin: 0 0 var(--space-3);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-12);
+}
+
+.panel-body h4 {
+  margin: var(--space-4) 0 var(--space-2);
+  font-size: var(--fs-11);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-3);
+}
+
 /* —— Left panel: tab rail + content —— */
 .left-panel {
   display: grid;
@@ -673,32 +708,121 @@ body {
 .media-thumb.waveform-thumb span {
   flex: 1;
   min-width: 1px;
-  background: var(--clip-audio);
+  background: var(--clip-audio-wave);
   border-radius: 1px;
   opacity: 0.85;
 }
 
-.media-item {
+/* Approved redesign: the media bin is a search + filter-chip header over a two-column
+ * card grid (thumb on top, meta below), CapCut-style. Scoped to .media-bin so other left
+ * panels that share .panel-body keep their own layouts. */
+.panel-body.media-bin {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.media-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
+  align-content: start;
+}
+
+.media-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding-bottom: var(--space-1);
+  background: var(--bg-1);
+}
+
+.media-search {
   display: flex;
   align-items: center;
-  gap: 0.65rem;
-  padding: 0.55rem 0.65rem;
+  gap: var(--space-2);
+  height: 30px;
+  padding: 0 var(--space-2);
   border-radius: var(--radius-m);
-  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--bg-0);
+  color: var(--text-3);
+}
+
+.media-search input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--fs-12);
+}
+
+.media-search input::placeholder {
+  color: var(--text-3);
+}
+
+.media-chips {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
   border: 1px solid transparent;
-  margin-bottom: var(--space-1);
-  transition: background 0.12s, border-color 0.12s;
+  background: var(--bg-3);
+  color: var(--text-2);
+  font: 600 var(--fs-11) var(--font-ui);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.chip:hover {
+  color: var(--text-1);
+}
+
+.chip.on {
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+}
+
+.chip-count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+  font-size: 10px;
+}
+
+.media-item {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  border-radius: 7px;
+  overflow: hidden;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  position: relative;
+  transition: border-color 0.12s, transform 0.12s ease;
 }
 
 .media-item:hover {
-  background: var(--bg-3);
-  border-color: var(--border);
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
 }
 
 .media-thumb {
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-m);
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 0;
   display: grid;
   place-items: center;
   font-size: 1rem;
@@ -742,12 +866,12 @@ body {
 
 .media-meta {
   min-width: 0;
-  flex: 1;
+  padding: 6px 8px 7px;
 }
 
 .media-meta .name {
-  font-size: 0.8125rem;
-  font-weight: 500;
+  font-size: var(--fs-12);
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -757,35 +881,62 @@ body {
   font-size: 0.7rem;
   color: var(--text-3);
   margin-top: 0.1rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+/* Add-to-timeline affordance floats over the thumb's corner on hover. */
 .media-add-hint {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.2rem;
-  font-size: 0.65rem;
-  color: var(--accent-hover);
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--on-accent);
   opacity: 0;
   transition: opacity 0.12s;
+  pointer-events: none;
 }
 
 .media-item:hover .media-add-hint {
   opacity: 1;
 }
 
-/* —— Preview —— */
+/* —— Preview ——
+ * The stage and transport keep dark-theme tokens in BOTH app themes (pro-NLE convention,
+ * approved redesign): footage always sits on near-black. Re-pinning the semantic tokens
+ * here means every child (icon buttons, timecode, hints) inherits the dark palette
+ * without per-component overrides. */
 .preview-column {
+  --bg-0: var(--stage-bg-0);
+  --bg-1: var(--stage-bg-1);
+  --bg-2: var(--stage-bg-2);
+  --bg-3: var(--stage-bg-3);
+  --border: var(--stage-border);
+  --border-strong: var(--stage-border-strong);
+  --text-1: var(--stage-text-1);
+  --text-2: var(--stage-text-2);
+  --text-3: var(--stage-text-3);
+  --accent: var(--stage-accent);
+  --accent-hover: var(--stage-accent-hover);
+  --accent-soft: var(--stage-accent-soft);
+  --on-accent: var(--stage-on-accent);
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--neutral-950);
+  background: var(--stage-bg-0);
 }
 
 .preview-host {
   position: relative;
   flex: 1;
   min-height: 0;
-  background: radial-gradient(ellipse at center, var(--neutral-900) 0%, var(--neutral-950) 72%);
+  background: var(--stage-bg-0);
 }
 
 .preview-handles-overlay {
@@ -853,11 +1004,42 @@ body {
   fill: var(--bg-1);
   stroke: var(--accent);
   stroke-width: 1.5;
-  cursor: nwse-resize;
 }
 
-.preview-handle-knob.rotate {
-  cursor: grab;
+.preview-handle-edge {
+  fill: var(--bg-1);
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+.preview-handle-rotate-glyph {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+
+.preview-guide {
+  stroke: var(--snap-guide);
+  stroke-width: 1;
+  stroke-dasharray: 6 4;
+  opacity: 0.9;
+}
+
+.preview-readout {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  padding: 2px 8px;
+  border-radius: var(--radius-s);
+  background: color-mix(in srgb, var(--bg-0) 85%, transparent);
+  border: 1px solid var(--border);
+  color: var(--text-1);
+  font-size: var(--fs-11);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+  backdrop-filter: blur(4px);
 }
 
 .preview-host .hint {
@@ -1005,10 +1187,11 @@ body {
   border: 1px solid transparent;
   border-radius: var(--radius-s);
   color: var(--text-1);
+  font-family: Consolas, "Cascadia Mono", monospace;
   font-variant-numeric: tabular-nums;
-  font-size: 0.9rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-size: 0.85rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
   padding: 2px 6px;
   text-align: center;
 }
@@ -1069,6 +1252,36 @@ body {
 
 .inspector-section {
   margin-bottom: var(--space-4);
+}
+
+/* Tabbed clip inspector (issue 5) — Video / Audio / Speed / Effects. */
+.insp-tabs {
+  display: flex;
+  gap: 2px;
+  margin: 0 0 var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.insp-tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  font: 600 var(--fs-12) var(--font-ui);
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 0.12s;
+}
+
+.insp-tab:hover {
+  color: var(--text-2);
+}
+
+.insp-tab.on {
+  color: var(--text-1);
+  border-bottom-color: var(--accent);
 }
 
 .inspector-section h3 {
@@ -1206,6 +1419,10 @@ body {
   font: inherit;
   font-size: var(--fs-12);
   font-variant-numeric: tabular-nums;
+}
+
+.insp-cell input[type="number"] {
+  font-family: Consolas, "Cascadia Mono", monospace;
 }
 
 .insp-cell input[type="range"] {
@@ -1362,11 +1579,137 @@ body {
   margin-left: auto;
 }
 
+/* ——————————————————————————————————————————————————————————
+ * Shared controls (approved redesign): give classless action buttons and native range
+ * sliders the design-system look, in one place, so every panel inherits it. Issues 4/6/7.
+ * —————————————————————————————————————————————————————————— */
+
+/* Classless <button>s inside any panel/inspector — "Add color adjust", "Add at playhead",
+ * pack/plugin actions — get the secondary-button treatment. Buttons with their own class
+ * (.btn*, .play-btn, .tool-btn, icon buttons, MenuSelect) are untouched. */
+.panel-body button:not([class]),
+.inspector-actions button:not([class]),
+.effects-catalog button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.7rem;
+  font: 600 var(--fs-12) var(--font-ui);
+  color: var(--text-1);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.panel-body button:not([class]):hover:not(:disabled),
+.inspector-actions button:not([class]):hover:not(:disabled),
+.effects-catalog button:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-hover);
+}
+
+.panel-body button:not([class]):disabled,
+.inspector-actions button:not([class]):disabled,
+.effects-catalog button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Custom range slider — kills the native HTML look everywhere. Thin token track, round
+ * accent thumb with a soft ring on hover/active. Chromium (WebView2) + WebKit (WKWebView). */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 16px;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+}
+
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+}
+
+input[type="range"]::-moz-range-progress {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  margin-top: -6px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-1);
+  border: 2px solid var(--accent);
+  box-shadow: 0 1px 4px var(--clip-shadow);
+  transition: box-shadow 0.12s, transform 0.12s;
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-1);
+  border: 2px solid var(--accent);
+  box-shadow: 0 1px 4px var(--clip-shadow);
+}
+
+input[type="range"]:hover::-webkit-slider-thumb,
+input[type="range"]:active::-webkit-slider-thumb {
+  box-shadow: 0 0 0 5px var(--accent-soft), 0 1px 4px var(--clip-shadow);
+}
+
+input[type="range"]:focus-visible {
+  outline: none;
+}
+
+input[type="range"]:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 5px var(--accent-soft);
+}
+
+input[type="range"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* —— Timeline —— */
+/* Timeline chrome keeps dark-theme tokens in BOTH app themes, matching the canvas
+ * (tokens.css pins the canvas --timeline-* values dark in light mode too). Same local
+ * re-pin pattern as .preview-column. */
 .timeline-wrap {
+  --bg-0: var(--stage-bg-0);
+  --bg-1: var(--stage-bg-1);
+  --bg-2: var(--stage-bg-2);
+  --bg-3: var(--stage-bg-3);
+  --border: var(--stage-border);
+  --border-strong: var(--stage-border-strong);
+  --text-1: var(--stage-text-1);
+  --text-2: var(--stage-text-2);
+  --text-3: var(--stage-text-3);
+  --accent: var(--stage-accent);
+  --accent-hover: var(--stage-accent-hover);
+  --accent-soft: var(--stage-accent-soft);
+  --on-accent: var(--stage-on-accent);
   display: flex;
   flex-direction: column;
-  background: var(--bg-1);
+  background: var(--timeline-bg);
   border-top: 1px solid var(--border);
   min-height: 0;
 }
@@ -1374,9 +1717,14 @@ body {
 .timeline-tools {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
-  padding: 0.45rem var(--space-3);
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--border);
+  /* Issue 3: opaque + above the canvas area so track-header rows can't bleed over the
+   * toolbar when the timeline is scrolled. */
+  position: relative;
+  z-index: 5;
+  background: var(--bg-1);
 }
 
 .tool-group {
@@ -1386,6 +1734,29 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius-m);
   padding: 2px;
+}
+
+/* Issue 2: the toolbar mixed .tool-btn (segmented) with .btn-icon-only (IconButton),
+ * which read as two different button styles. Unify loose IconButtons to the flat
+ * tool-button look so the whole toolbar is one consistent row. */
+.timeline-tools .btn-icon-only {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-2);
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+}
+
+.timeline-tools .btn-icon-only:hover:not(:disabled) {
+  background: var(--bg-3);
+  border-color: transparent;
+  color: var(--text-1);
+}
+
+.timeline-tools .btn-icon-only.active {
+  background: var(--accent-soft);
+  color: var(--accent-hover);
 }
 
 .tool-btn {
@@ -1440,6 +1811,46 @@ body {
   position: relative;
   flex: 1;
   min-height: 0;
+}
+
+/* Custom timeline scrollbars (issue 8) — overlaid at the right/bottom edges of the
+ * canvas-wrap, shown only when content overflows. */
+.tl-scrollbar {
+  position: absolute;
+  z-index: 6;
+  background: color-mix(in srgb, var(--bg-0) 55%, transparent);
+}
+
+.tl-scrollbar.horizontal {
+  right: 10px;
+  bottom: 0;
+}
+
+.tl-scrollbar.vertical {
+  right: 0;
+  bottom: 10px;
+}
+
+.tl-scroll-thumb {
+  position: absolute;
+  border-radius: 5px;
+  background: var(--border-strong);
+  transition: background 0.12s;
+}
+
+.tl-scrollbar.horizontal .tl-scroll-thumb {
+  top: 1px;
+  bottom: 1px;
+}
+
+.tl-scrollbar.vertical .tl-scroll-thumb {
+  left: 1px;
+  right: 1px;
+}
+
+.tl-scroll-thumb:hover,
+.tl-scroll-thumb:active {
+  background: var(--text-3);
 }
 
 .timeline-empty {
@@ -1505,9 +1916,34 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 0 6px;
+  padding: 0 6px 0 9px;
   pointer-events: auto;
   overflow: visible;
+}
+
+/* Per-kind color tag (approved redesign): a 3px strip identifying the track type at a
+ * glance, matching the clip identity colors on the canvas. */
+.track-header-row::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 26px;
+  border-radius: 2px;
+}
+
+.track-header-row.kind-video::before {
+  background: var(--clip-video-edge);
+}
+
+.track-header-row.kind-audio::before {
+  background: var(--clip-audio-wave);
+}
+
+.track-header-row.kind-caption::before {
+  background: var(--clip-caption-edge);
 }
 
 .track-header-icon {
@@ -1616,22 +2052,36 @@ body {
   position: fixed;
   inset: 0;
   z-index: 100;
-  display: grid;
-  place-items: center;
+  display: flex;
+  flex-direction: column;
+  /* Issue 9: solid opaque page (no translucency/blur) — this is the app's first screen,
+   * there is nothing meaningful behind it to see through to. */
   background:
-    radial-gradient(ellipse 80% 50% at 50% 0%, var(--accent-soft), transparent 55%),
-    color-mix(in srgb, var(--bg-0) 94%, transparent);
-  backdrop-filter: blur(16px);
+    radial-gradient(ellipse 90% 55% at 50% -5%, var(--accent-soft), transparent 60%),
+    var(--bg-0);
   overflow: auto;
-  padding: var(--space-6);
 }
 
 .welcome-screen.hidden {
   display: none;
 }
 
+/* Frameless-window controls on the home screen (issue 9: no close button before). */
+.welcome-titlebar {
+  height: var(--titlebar-h);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-left: var(--space-4);
+}
+
+/* Issue 9: fill the space — wide, top-aligned content instead of a small centered card
+ * marooned in empty space. */
 .welcome-home {
-  width: min(960px, 100%);
+  width: min(1180px, 100%);
+  margin: 0 auto;
+  padding: var(--space-4) var(--space-6) var(--space-6);
 }
 
 .welcome-home-header {
@@ -1709,14 +2159,26 @@ body {
   position: relative;
   background: var(--bg-1);
   border: 1px solid var(--border);
-  border-radius: var(--radius-l);
+  border-radius: 9px;
   overflow: hidden;
-  transition: border-color 0.15s, background 0.15s;
+  transition: border-color 0.15s, background 0.15s, transform 0.15s ease, box-shadow 0.15s;
 }
 
 .project-card:hover {
   border-color: var(--border-strong);
   background: var(--bg-2);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-card,
+  .project-card:hover,
+  .media-item,
+  .media-item:hover {
+    transition: none;
+    transform: none;
+  }
 }
 
 .project-card-new {
@@ -1725,13 +2187,25 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: var(--space-2);
+  gap: var(--space-3);
   width: 100%;
   color: var(--text-2);
+  font: 600 var(--fs-13) var(--font-ui);
   background: transparent;
   border: 1.5px dashed var(--border-strong);
-  border-radius: var(--radius-l);
+  border-radius: 9px;
   cursor: pointer;
+}
+
+/* Accent plus-circle (approved redesign home tile). */
+.project-card-new svg {
+  width: 36px;
+  height: 36px;
+  padding: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--on-accent);
+  box-sizing: border-box;
 }
 
 .project-card-new:hover {
@@ -1752,9 +2226,9 @@ body {
 }
 
 .project-card-thumb {
-  aspect-ratio: 9 / 16;
-  max-height: 160px;
-  background: var(--bg-3);
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  background: var(--stage-bg-0);
 }
 
 .project-card-meta {
@@ -2040,17 +2514,18 @@ dialog menu {
 
 .effect-list {
   list-style: none;
-  margin: 0.75rem 0 0;
+  margin: 0.5rem 0 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: var(--space-2);
 }
 
 .effect-list li {
-  padding: 0.5rem;
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-m);
+  background: var(--bg-2);
 }
 
 .effect-list li.disabled {
@@ -2067,14 +2542,35 @@ dialog menu {
 .effects-catalog {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.35rem;
+  gap: var(--space-2);
   margin: 0.5rem 0;
 }
 
+/* These panels render bare <button>s (no .btn class) — give them the real button
+ * treatment so effects/filters/transitions/stickers/extensions read as designed. */
 .effects-catalog button {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.4rem;
+  padding: 0.4rem 0.7rem;
+  font: 600 var(--fs-12) var(--font-ui);
+  color: var(--text-1);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.effects-catalog button:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-hover);
+}
+
+.effects-catalog button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .coming-soon-badge {

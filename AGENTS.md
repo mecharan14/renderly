@@ -27,9 +27,17 @@ PR. If one of these seems wrong, say so explicitly and ask — do not quietly wo
    read-only perception tools (render frame at time T, transcript, scene/silence detection,
    waveform peaks). Don't add an edit-only tool without asking whether a perception
    counterpart is needed.
-5. **Native video preview, not webview.** In `renderly-app`, the playback/preview surface is
-   a native wgpu surface embedded in the window — frames never round-trip through the
-   webview/JS bridge. Webview is chrome only (panels, dialogs, inspectors).
+5. **Preview lives in the webview; the engine stays the single source of truth.**
+   (Revised 2026-07: the original "native child-window preview" rule is retired — measured
+   on real 1080p60/51Mbps footage, the webview's media pipeline presents 60fps with zero
+   dropped frames and ~0.1ms/frame GPU upload, while the native path's CLI-decode +
+   readback couldn't match it and cost four per-OS child-window backends. See
+   docs/preview-webview.md.) The preview renders into a `<canvas>` in the webview:
+   browser-native decode (WebCodecs / video pipeline) feeds the **same `renderly-core`
+   compositor compiled to wasm32** — never a hand-rolled JS reimplementation of effects,
+   which would break preview↔export parity. The native wgpu child-window preview remains
+   as a fallback during the migration and is removed once the webview path reaches parity.
+   Export and headless rendering continue to use the native engine unchanged.
 6. **Plugins are sandboxed WASM (code) or declarative asset packs (no code).** Never add a
    plugin mechanism that loads native dynamic libraries or unsandboxed scripts.
 7. **No paywalled or cloud-only-by-default features.** Local models (Whisper, local TTS)

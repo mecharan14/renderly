@@ -91,6 +91,11 @@ export function MediaClipInspector({ track, clip }: { track: Track; clip: MediaC
   const [maskFeather, setMaskFeather] = useState(clip.mask?.feather ?? 0);
   const setTool = useEditorStore((s) => s.setTool);
 
+  const showAudio = clip.type === "audio" || track.kind === "audio" || clip.type === "video";
+  const showTransform = clip.type === "video" || track.kind === "video";
+  type InspTab = "video" | "audio" | "speed" | "effects";
+  const [tab, setTab] = useState<InspTab>(showTransform ? "video" : "audio");
+
   useEffect(() => {
     setGain(clip.gain_db);
     setSourceIn(clip.source_in_secs);
@@ -117,9 +122,15 @@ export function MediaClipInspector({ track, clip }: { track: Track; clip: MediaC
     await dispatch(setClipTransform(track.id, clip.id, next));
   }
 
-  const showAudio = clip.type === "audio" || track.kind === "audio" || clip.type === "video";
-  const showTransform = clip.type === "video" || track.kind === "video";
   const fileName = media ? media.path.split(/[/\\]/).pop() : null;
+
+  const tabs: { id: InspTab; label: string; show: boolean }[] = [
+    { id: "video", label: "Video", show: showTransform },
+    { id: "audio", label: "Audio", show: showAudio },
+    { id: "speed", label: "Speed", show: true },
+    { id: "effects", label: "Effects", show: true },
+  ];
+  const activeTab = tabs.find((t) => t.id === tab && t.show) ? tab : tabs.find((t) => t.show)!.id;
 
   return (
     <div className="inspector">
@@ -151,6 +162,23 @@ export function MediaClipInspector({ track, clip }: { track: Track; clip: MediaC
         </div>
       </div>
 
+      <div className="insp-tabs">
+        {tabs
+          .filter((t) => t.show)
+          .map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              className={`insp-tab${activeTab === t.id ? " on" : ""}`}
+              onClick={() => setTab(t.id)}
+            >
+              {t.label}
+            </button>
+          ))}
+      </div>
+
+      {activeTab === "video" && (
+      <>
       <div className="inspector-section">
         <h3>Trim</h3>
         <div className="insp-grid-2">
@@ -184,20 +212,6 @@ export function MediaClipInspector({ track, clip }: { track: Track; clip: MediaC
       {showTransform && (
         <div className="inspector-section">
           <h3>Transform</h3>
-          <label className="insp-cell">
-            <span>Speed · {speed.toFixed(2)}×</span>
-            <input
-              type="range"
-              min={0.25}
-              max={4}
-              step={0.05}
-              value={speed}
-              disabled={track.locked}
-              onChange={(e) => setSpeed(parseFloat(e.target.value))}
-              onMouseUp={() => void dispatch(setClipSpeed(track.id, clip.id, speed))}
-              onTouchEnd={() => void dispatch(setClipSpeed(track.id, clip.id, speed))}
-            />
-          </label>
           <div className="insp-grid-2">
             <NumCell
               label="X"
@@ -299,11 +313,39 @@ export function MediaClipInspector({ track, clip }: { track: Track; clip: MediaC
         </div>
       )}
 
+      </>
+      )}
+
+      {activeTab === "speed" && (
+        <div className="inspector-section">
+          <h3>Speed</h3>
+          <label className="insp-cell">
+            <span>Speed · {speed.toFixed(2)}×</span>
+            <input
+              type="range"
+              min={0.25}
+              max={4}
+              step={0.05}
+              value={speed}
+              disabled={track.locked}
+              onChange={(e) => setSpeed(parseFloat(e.target.value))}
+              onMouseUp={() => void dispatch(setClipSpeed(track.id, clip.id, speed))}
+              onTouchEnd={() => void dispatch(setClipSpeed(track.id, clip.id, speed))}
+            />
+          </label>
+          <p className="empty-hint">
+            Clip duration scales inversely with speed; audio is pitch-corrected on export.
+          </p>
+        </div>
+      )}
+
+      {activeTab === "effects" && (
+      <>
       {showTransform && project && (
         <MulticamSection project={project} clip={clip.type === "video" ? clip : null} />
       )}
 
-      <details className="insp-disclosure">
+      <details className="insp-disclosure" open>
         <summary>Keyframes</summary>
         <KeyframeEditor track={track} clip={clip} nested />
       </details>
@@ -574,9 +616,13 @@ export function MediaClipInspector({ track, clip }: { track: Track; clip: MediaC
           </div>
         </details>
       )}
+      </>
+      )}
 
+      {activeTab === "audio" && (
+      <>
       {showAudio && (
-        <details className="insp-disclosure">
+        <details className="insp-disclosure" open>
           <summary>Denoise</summary>
           <div className="inspector-section insp-disclosure-body">
             <button
@@ -608,23 +654,7 @@ export function MediaClipInspector({ track, clip }: { track: Track; clip: MediaC
 
       {showAudio && (
         <div className="inspector-section">
-          <h3>Audio</h3>
-          {!showTransform && (
-            <label className="insp-cell">
-              <span>Speed · {speed.toFixed(2)}×</span>
-              <input
-                type="range"
-                min={0.25}
-                max={4}
-                step={0.05}
-                value={speed}
-                disabled={track.locked}
-                onChange={(e) => setSpeed(parseFloat(e.target.value))}
-                onMouseUp={() => void dispatch(setClipSpeed(track.id, clip.id, speed))}
-                onTouchEnd={() => void dispatch(setClipSpeed(track.id, clip.id, speed))}
-              />
-            </label>
-          )}
+          <h3>Levels</h3>
           <label className="insp-cell">
             <span>Volume · {gain} dB</span>
             <input
@@ -681,6 +711,8 @@ export function MediaClipInspector({ track, clip }: { track: Track; clip: MediaC
             </label>
           )}
         </div>
+      )}
+      </>
       )}
 
       <div className="inspector-actions">

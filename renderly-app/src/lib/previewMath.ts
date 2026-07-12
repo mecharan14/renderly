@@ -121,75 +121,164 @@ export function hitTestHandle(
   return null;
 }
 
+export type DragMods = { shift: boolean; alt: boolean };
+
+export type DragOutcome = {
+  transform: ClipTransform;
+  /** Vertical center guide active (clip centered on canvas x). */
+  guideV: boolean;
+  /** Horizontal center guide active (clip centered on canvas y). */
+  guideH: boolean;
+};
+
+/** Unit-square point each scale handle drags (NDC, +Y up). */
+const HANDLE_UNIT: Partial<Record<HandleKind, NdcPoint>> = {
+  "scale-nw": { x: -1, y: 1 },
+  "scale-ne": { x: 1, y: 1 },
+  "scale-sw": { x: -1, y: -1 },
+  "scale-se": { x: 1, y: -1 },
+  "scale-n": { x: 0, y: 1 },
+  "scale-s": { x: 0, y: -1 },
+  "scale-e": { x: 1, y: 0 },
+  "scale-w": { x: -1, y: 0 },
+};
+
+const MIN_SCALE = 0.05;
+/** Upper bound so a scale drag can't run off to infinity (issue: boundless box). */
+const MAX_SCALE = 8;
+/** Clip center can't be dragged more than this far off-canvas (NDC). */
+const MAX_OFFSET = 2;
+const clampScale = (v: number) => Math.max(MIN_SCALE, Math.min(MAX_SCALE, v));
+const clampOffset = (v: number) => Math.max(-MAX_OFFSET, Math.min(MAX_OFFSET, v));
+/** Move snap threshold in NDC (~1.5% of the frame). */
+const MOVE_SNAP_NDC = 0.03;
+/** Free rotation soft-snaps to multiples of 90° within this many degrees. */
+const ROTATE_SOFT_SNAP_DEG = 3;
+
+function rotatePoint(p: NdcPoint, deg: number): NdcPoint {
+  const rad = (deg * Math.PI) / 180;
+  const c = Math.cos(rad);
+  const s = Math.sin(rad);
+  return { x: p.x * c - p.y * s, y: p.x * s + p.y * c };
+}
+
+/**
+ * Direct-manipulation drag semantics (CapCut/OpenCut conventions):
+ * - move: snaps to canvas center on either axis (Alt disables snapping)
+ * - rotate: Shift steps 15°; otherwise soft-snaps near 0/±90/180
+ * - corner scale: uniform, opposite corner anchored; Shift = free distort;
+ *   Alt = scale from center
+ * - edge scale: single-axis stretch, opposite edge anchored; Alt = from center
+ */
 export function applyHandleDrag(
   kind: HandleKind,
   start: ClipTransform,
   startNdc: NdcPoint,
   curNdc: NdcPoint,
-): ClipTransform {
+  mods: DragMods = { shift: false, alt: false },
+): DragOutcome {
   const dx = curNdc.x - startNdc.x;
   const dy = curNdc.y - startNdc.y;
 
   if (kind === "move") {
-    return { ...start, x: start.x + dx, y: start.y + dy };
+    let x = clampOffset(start.x + dx);
+    let y = clampOffset(start.y + dy);
+    let guideV = false;
+    let guideH = false;
+    if (!mods.alt) {
+      if (Math.abs(x) < MOVE_SNAP_NDC) {
+        x = 0;
+        guideV = true;
+      }
+      if (Math.abs(y) < MOVE_SNAP_NDC) {
+        y = 0;
+        guideH = true;
+      }
+    }
+    return { transform: { ...start, x, y }, guideV, guideH };
   }
 
   if (kind === "rotate") {
     const a0 = Math.atan2(startNdc.y - start.y, startNdc.x - start.x);
     const a1 = Math.atan2(curNdc.y - start.y, curNdc.x - start.x);
     let deg = start.rotation_deg + ((a1 - a0) * 180) / Math.PI;
-    // Normalize loosely
     while (deg > 180) deg -= 360;
     while (deg < -180) deg += 360;
-    return { ...start, rotation_deg: deg };
+    if (mods.shift) {
+      deg = Math.round(deg / 15) * 15;
+    } else {
+      const nearest = Math.round(deg / 90) * 90;
+      if (Math.abs(deg - nearest) < ROTATE_SOFT_SNAP_DEG) deg = nearest;
+    }
+    if (deg === -180) deg = 180;
+    return { transform: { ...start, rotation_deg: deg }, guideV: false, guideH: false };
   }
 
-  // Scale: distance from center in start vs current, along local axes after inverse rotation.
-  const invRad = (-start.rotation_deg * Math.PI) / 180;
-  const c = Math.cos(invRad);
-  const s = Math.sin(invRad);
-  const toLocal = (p: NdcPoint): NdcPoint => {
-    const ox = p.x - start.x;
-    const oy = p.y - start.y;
-    return { x: ox * c - oy * s, y: ox * s + oy * c };
-  };
+  // —— Scale ——
+  const hu = HANDLE_UNIT[kind];
+  if (!hu) return { transform: start, guideV: false, guideH: false };
+  const au: NdcPoint = { x: -hu.x, y: -hu.y };
+
+  // Local space: rotation removed, origin at the clip center.
+  const toLocal = (p: NdcPoint): NdcPoint =>
+    rotatePoint({ x: p.x - start.x, y: p.y - start.y }, -start.rotation_deg);
   const localStart = toLocal(startNdc);
   const localCur = toLocal(curNdc);
 
+  // Measure the drag relative to the anchor so the anchored point stays put.
+  const anchorLocal: NdcPoint = { x: au.x * start.scale_x, y: au.y * start.scale_y };
+  const from = { x: localStart.x - anchorLocal.x, y: localStart.y - anchorLocal.y };
+  const to = { x: localCur.x - anchorLocal.x, y: localCur.y - anchorLocal.y };
+
   let scale_x = start.scale_x;
   let scale_y = start.scale_y;
-  const minScale = 0.05;
+  const isCorner = hu.x !== 0 && hu.y !== 0;
 
-  const sx = (axis: "x" | "y", from: number, to: number) => {
-    if (Math.abs(from) < 1e-4) return axis === "x" ? scale_x : scale_y;
-    const ratio = to / from;
-    return Math.max(minScale, (axis === "x" ? start.scale_x : start.scale_y) * ratio);
-  };
-
-  switch (kind) {
-    case "scale-e":
-    case "scale-w":
-      scale_x = sx("x", localStart.x, localCur.x);
-      break;
-    case "scale-n":
-    case "scale-s":
-      scale_y = sx("y", localStart.y, localCur.y);
-      break;
-    case "scale-ne":
-    case "scale-nw":
-    case "scale-se":
-    case "scale-sw": {
-      scale_x = sx("x", localStart.x, localCur.x);
-      scale_y = sx("y", localStart.y, localCur.y);
-      // Uniform-ish: average for nicer corner feel
-      const u = (scale_x / start.scale_x + scale_y / start.scale_y) / 2;
-      scale_x = Math.max(minScale, start.scale_x * u);
-      scale_y = Math.max(minScale, start.scale_y * u);
-      break;
+  if (isCorner) {
+    if (mods.shift) {
+      // Free distort.
+      if (Math.abs(from.x) > 1e-4) scale_x = clampScale(start.scale_x * Math.abs(to.x / from.x));
+      if (Math.abs(from.y) > 1e-4) scale_y = clampScale(start.scale_y * Math.abs(to.y / from.y));
+    } else {
+      // Uniform: preserve aspect using the diagonal distance ratio.
+      const u = Math.hypot(to.x, to.y) / Math.max(1e-4, Math.hypot(from.x, from.y));
+      scale_x = clampScale(start.scale_x * u);
+      scale_y = clampScale(start.scale_y * u);
     }
-    default:
-      break;
+  } else if (hu.x !== 0) {
+    if (Math.abs(from.x) > 1e-4) scale_x = clampScale(start.scale_x * Math.abs(to.x / from.x));
+  } else {
+    if (Math.abs(from.y) > 1e-4) scale_y = clampScale(start.scale_y * Math.abs(to.y / from.y));
   }
 
-  return { ...start, scale_x, scale_y };
+  let center: NdcPoint = { x: start.x, y: start.y };
+  if (!mods.alt) {
+    // Re-derive the center so the anchor point does not move.
+    const anchorWorld = transformNdcPoint(au, start);
+    const anchorLocalNew = rotatePoint(
+      { x: au.x * scale_x, y: au.y * scale_y },
+      start.rotation_deg,
+    );
+    center = { x: anchorWorld.x - anchorLocalNew.x, y: anchorWorld.y - anchorLocalNew.y };
+  }
+
+  return {
+    transform: { ...start, scale_x, scale_y, x: center.x, y: center.y },
+    guideV: false,
+    guideH: false,
+  };
+}
+
+/** Rotation-aware resize cursor for a handle, given its screen-space direction from the box center. */
+export function cursorForHandle(
+  kind: HandleKind,
+  handlePx: PxPoint,
+  centerPx: PxPoint,
+): string {
+  if (kind === "move") return "move";
+  if (kind === "rotate") return "grab";
+  const angle = (Math.atan2(handlePx.y - centerPx.y, handlePx.x - centerPx.x) * 180) / Math.PI;
+  // Bucket into 8 directions; opposite directions share a cursor.
+  const bucket = Math.round(((angle + 360) % 360) / 45) % 4;
+  return ["ew-resize", "nwse-resize", "ns-resize", "nesw-resize"][bucket];
 }

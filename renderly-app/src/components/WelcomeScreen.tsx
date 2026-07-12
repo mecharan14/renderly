@@ -7,6 +7,7 @@ import {
 } from "../lib/projectFlows";
 import { useEditorStore } from "../store/editorStore";
 import { IconButton } from "./ui/IconButton";
+import { WindowControls } from "./ui/WindowControls";
 import * as ipc from "../lib/ipc";
 
 function formatModified(ms: number): string {
@@ -82,6 +83,9 @@ export function WelcomeScreen() {
 
   return (
     <div className={`welcome-screen${hasProject ? " hidden" : ""}`}>
+      <div className="welcome-titlebar" data-tauri-drag-region>
+        <WindowControls />
+      </div>
       <div className="welcome-home">
         <div className="welcome-home-header">
           <div className="welcome-brand" aria-hidden>
