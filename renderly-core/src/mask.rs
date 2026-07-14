@@ -1,9 +1,14 @@
 //! Clip mask / matte application (Phase 4). CPU path shared by preview and export.
 
-use crate::media::RgbaFrame;
+use crate::frame::RgbaFrame;
 use crate::project::{ClipMask, ClipMaskKind, MaskShape};
 
 /// Apply a clip mask to an RGBA frame in place (modulates alpha).
+///
+/// `Raster`/`Generated` (filesystem-backed) mattes are only available on native builds —
+/// they go through the `image` crate's file decode, which is unavailable on wasm32. `Luma`
+/// (raw in-memory pixels) works everywhere; JS can decode a raster matte and hand it through
+/// as `Luma` bytes on the wasm path. See docs/preview-webview.md P2 scope limits.
 pub fn apply_clip_mask(frame: &mut RgbaFrame, mask: &ClipMask) {
     if !mask.enabled {
         return;
@@ -15,24 +20,45 @@ pub fn apply_clip_mask(frame: &mut RgbaFrame, mask: &ClipMask) {
                 apply_shape_mask(frame, &shape, mask);
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
         ClipMaskKind::Raster { path } => {
             if let Ok(matte) = image::open(path) {
-                apply_raster_matte(frame, &matte.to_luma8(), mask.invert, mask.feather);
+                let gray = matte.to_luma8();
+                apply_raster_matte(
+                    frame,
+                    gray.as_raw(),
+                    gray.width(),
+                    gray.height(),
+                    mask.invert,
+                    mask.feather,
+                );
             }
         }
+        #[cfg(target_arch = "wasm32")]
+        ClipMaskKind::Raster { .. } => {}
+        #[cfg(not(target_arch = "wasm32"))]
         ClipMaskKind::Generated { cache_dir } => {
             let matte_path = std::path::Path::new(cache_dir).join("matte.png");
             if let Ok(matte) = image::open(&matte_path) {
-                apply_raster_matte(frame, &matte.to_luma8(), mask.invert, mask.feather);
+                let gray = matte.to_luma8();
+                apply_raster_matte(
+                    frame,
+                    gray.as_raw(),
+                    gray.width(),
+                    gray.height(),
+                    mask.invert,
+                    mask.feather,
+                );
             }
         }
+        #[cfg(target_arch = "wasm32")]
+        ClipMaskKind::Generated { .. } => {}
         ClipMaskKind::Luma {
             pixels,
             width,
             height,
         } => {
-            let matte = image::GrayImage::from_raw(*width, *height, pixels.clone()).unwrap();
-            apply_raster_matte(frame, &matte, mask.invert, mask.feather);
+            apply_raster_matte(frame, pixels, *width, *height, mask.invert, mask.feather);
         }
     }
 }
@@ -106,24 +132,40 @@ fn soft_edge(dist_outside: f32, feather: f32) -> f32 {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn apply_luma_matte(
     frame: &mut RgbaFrame,
     matte: &image::GrayImage,
     invert: bool,
     feather: f64,
 ) {
-    apply_raster_matte(frame, matte, invert, feather);
+    apply_raster_matte(
+        frame,
+        matte.as_raw(),
+        matte.width(),
+        matte.height(),
+        invert,
+        feather,
+    );
 }
 
-fn apply_raster_matte(frame: &mut RgbaFrame, matte: &image::GrayImage, invert: bool, feather: f64) {
-    let mw = matte.width();
-    let mh = matte.height();
+/// Modulate `frame`'s alpha by a single-channel (luma) matte given as raw, row-major,
+/// unpadded bytes — no `image` crate dependency, so this is usable on wasm32.
+fn apply_raster_matte(
+    frame: &mut RgbaFrame,
+    matte: &[u8],
+    mw: u32,
+    mh: u32,
+    invert: bool,
+    feather: f64,
+) {
     let feather = feather.clamp(0.0, 1.0) as f32;
     for y in 0..frame.height {
         for x in 0..frame.width {
             let mx = (x as u64 * mw as u64 / frame.width.max(1) as u64) as u32;
             let my = (y as u64 * mh as u64 / frame.height.max(1) as u64) as u32;
-            let mut a = matte.get_pixel(mx.min(mw - 1), my.min(mh - 1))[0] as f32 / 255.0;
+            let midx = (my.min(mh.saturating_sub(1)) * mw + mx.min(mw.saturating_sub(1))) as usize;
+            let mut a = matte.get(midx).copied().unwrap_or(255) as f32 / 255.0;
             if invert {
                 a = 1.0 - a;
             }
@@ -144,7 +186,9 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Heuristic / CLI segmentation matte used when no ONNX runtime is linked.
+/// Heuristic / CLI segmentation matte used when no ONNX runtime is linked. Native-only
+/// (used by `segmentation`, which is excluded on wasm32).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn generate_heuristic_matte(frame: &RgbaFrame, threshold: f64) -> image::GrayImage {
     let threshold = (threshold.clamp(0.0, 1.0) * 255.0) as u8;
     let mut out = image::GrayImage::new(frame.width, frame.height);

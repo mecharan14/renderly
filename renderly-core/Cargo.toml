@@ -6,17 +6,24 @@ license.workspace = true
 description = "Headless engine for Renderly: project model, command API, media I/O, compositing. No UI dependencies — see docs/architecture.md."
 
 [dependencies]
-ab_glyph = "0.2.32"
 bytemuck = { version = "1.25.0", features = ["derive"] }
-image = "0.25.10"
-pollster = "0.4.0"
-reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+wgpu = "30.0.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ab_glyph = "0.2.32"
+image = "0.25.10"
+pollster = "0.4.0"
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls"] }
 wasmtime = "36.0.2"
 wat = "1.235.0"
-    wgpu = "30.0.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+uuid = { workspace = true, features = ["js"] }
+getrandom = { version = "0.2", features = ["js"] }
+wasm-bindgen = "0.2"
 
 [dev-dependencies]

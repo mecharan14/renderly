@@ -1,10 +1,16 @@
 //! Declarative asset packs (`pack.json` + assets). See docs/asset-pack.md.
 
-use crate::media::RgbaFrame;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::frame::RgbaFrame;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::project::{EffectInstance, Project};
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::collections::HashSet;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PackManifest {
@@ -127,6 +133,13 @@ pub struct CubeLut {
     pub data: Vec<[f32; 3]>,
 }
 
+/// Everything below that touches the filesystem or `Project` (pack manifest/`.cube` loading)
+/// is native-only. The wasm compositor is fed already-decoded pack data another way (or, for
+/// P2, simply doesn't apply pack LUTs yet — see docs/preview-webview.md P2 scope limits); the
+/// pure LUT-sampling/upload helpers (`CubeLut`, `cube_lut_upload_bytes`, `find_cube_lut`,
+/// `parse_pack_lut_id`) still compile everywhere since `compose`/`compose::effects` reference
+/// them unconditionally.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_pack(root: &Path) -> Result<LoadedPack, String> {
     let manifest_path = root.join("pack.json");
     let text = std::fs::read_to_string(&manifest_path)
@@ -173,10 +186,12 @@ pub fn find_sfx<'a>(
     Some((pack, sfx))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn pack_id_at(root: &Path) -> Option<String> {
     load_pack(root).ok().map(|p| p.manifest.id)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_project_packs(project: &Project) -> Vec<LoadedPack> {
     let mut out = Vec::new();
     for path in &project.asset_pack_paths {
@@ -187,6 +202,7 @@ pub fn load_project_packs(project: &Project) -> Vec<LoadedPack> {
     out
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn known_effect_ids(project: &Project) -> HashSet<String> {
     let mut ids = HashSet::new();
     for pack in load_project_packs(project) {
@@ -224,12 +240,16 @@ pub fn cube_lut_upload_bytes(cube: &CubeLut) -> Vec<u8> {
 /// Apply enabled pack LUT effects (CPU) to a frame in list order.
 ///
 /// Pack LUTs are normally applied on the GPU in [`crate::compose::effects::EffectProcessor`]
-/// (improvement-plan A7). This path remains for tests and headless fallbacks.
+/// (improvement-plan A7). This path remains for tests and headless fallbacks. Native-only
+/// (loads packs from disk via `Project::asset_pack_paths`); the wasm compositor defers pack
+/// LUTs, see docs/preview-webview.md P2.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn apply_pack_effects(project: &Project, frame: &mut RgbaFrame, effects: &[EffectInstance]) {
     apply_pack_effects_cpu(project, frame, effects);
 }
 
 /// CPU trilinear pack LUT application (see [`apply_pack_effects`]).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn apply_pack_effects_cpu(
     project: &Project,
     frame: &mut RgbaFrame,
@@ -282,6 +302,7 @@ pub fn find_caption_style<'a>(
     None
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_cube(path: &Path) -> Result<CubeLut, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let mut size = 0usize;
@@ -322,6 +343,7 @@ fn parse_cube(path: &Path) -> Result<CubeLut, String> {
     Ok(CubeLut { size, data })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn apply_cube(frame: &mut RgbaFrame, cube: &CubeLut, intensity: f32) {
     if intensity <= 0.0 {
         return;
@@ -339,6 +361,7 @@ fn apply_cube(frame: &mut RgbaFrame, cube: &CubeLut, intensity: f32) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn sample_cube(cube: &CubeLut, r: f32, g: f32, b: f32, max_i: f32) -> [f32; 3] {
     let n = cube.size;
     let rf = (r * max_i).clamp(0.0, max_i);
@@ -372,11 +395,13 @@ fn sample_cube(cube: &CubeLut, r: f32, g: f32, b: f32, max_i: f32) -> [f32; 3] {
     lerp3(c0, c1, tb)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn cube_at(cube: &CubeLut, r: usize, g: usize, b: usize) -> [f32; 3] {
     let n = cube.size;
     cube.data[r + g * n + b * n * n]
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     [
         a[0] + (b[0] - a[0]) * t,

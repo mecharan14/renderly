@@ -1,7 +1,7 @@
 //! CPU chroma key → alpha (Phase 4). Production path runs on the GPU in
 //! [`super::effects::EffectProcessor`] (improvement-plan A7); this module remains for unit tests.
 
-use crate::media::RgbaFrame;
+use crate::frame::RgbaFrame;
 use crate::project::EffectInstance;
 
 pub fn apply_chroma_effects(frame: &mut RgbaFrame, effects: &[EffectInstance]) {

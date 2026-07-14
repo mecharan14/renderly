@@ -2,15 +2,15 @@
 
 use crate::captions::CaptionError;
 use crate::commands::ExportPreset;
-use crate::compose::{ComposeError, ComposeLayer, Compositor, LayerTransition};
+use crate::compose::eval::{self, EvalError};
+use crate::compose::{ComposeError, ComposeLayer, Compositor};
 use crate::media::{
     mix_timeline_audio, mux_video_audio, AudioMixClip, DuckSettings, FfmpegCliError, ReaderOptions,
     RgbaFrame, VideoEncoder, VideoReader,
 };
-use crate::project::{
-    evaluate_transform, evaluate_volume_db, Clip, ClipTransform, MediaKind, Project,
-    TrackAudioRole, TrackKind,
-};
+#[cfg(test)]
+use crate::project::MediaKind;
+use crate::project::{evaluate_volume_db, Clip, ClipTransform, Project, TrackAudioRole, TrackKind};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -33,6 +33,15 @@ pub enum ExportError {
     /// Returned when `export_project_with_progress`'s callback returns `false`.
     #[error("export cancelled")]
     Cancelled,
+}
+
+impl From<EvalError> for ExportError {
+    fn from(e: EvalError) -> Self {
+        match e {
+            EvalError::MediaNotFound(id) => ExportError::MediaNotFound(id),
+            EvalError::NotVideo(id) => ExportError::NotVideo(id),
+        }
+    }
 }
 
 /// Coarse stage of an in-flight export — used by GUI progress UI and CLI status lines.
@@ -105,23 +114,6 @@ impl ExportSettings {
             crf: self.crf,
         }
     }
-}
-
-struct ActiveLayer {
-    /// Decoder cache key (usually track id; crossfade incoming uses a derived key).
-    decoder_key: uuid::Uuid,
-    path: PathBuf,
-    source_time: f64,
-    transform: ClipTransform,
-    effects: Vec<crate::project::EffectInstance>,
-    transition: Option<crate::compose::LayerTransition>,
-    mask: Option<crate::project::ClipMask>,
-    background_removal: Option<crate::project::BackgroundRemoval>,
-}
-
-struct ActiveCaption {
-    text: String,
-    style_id: String,
 }
 
 struct DecoderState {
@@ -299,7 +291,7 @@ impl FrameRenderer {
 
         let mut t = start;
         while t <= end + 1e-9 {
-            let layers = active_layers(project, t)?;
+            let layers = eval::active_layers(project, t)?;
             for layer in &layers {
                 let decoder = self
                     .decoders
@@ -351,7 +343,7 @@ impl FrameRenderer {
         time_secs: f64,
         readback: bool,
     ) -> Result<(Option<Vec<u8>>, FrameTiming), ExportError> {
-        let layers = active_layers(project, time_secs)?;
+        let layers = eval::active_layers(project, time_secs)?;
         let packs = crate::packs::load_project_packs(project);
         let mut compose_layers = Vec::with_capacity(layers.len() + 2);
         let plugin_host = crate::plugins::PluginHost::for_project(project).ok();
@@ -394,7 +386,7 @@ impl FrameRenderer {
             }
         }
 
-        for cap in active_captions(project, time_secs) {
+        for cap in eval::active_captions(project, time_secs) {
             compose_layers.push(ComposeLayer {
                 frame: crate::captions::render_caption_for_project(
                     project,
@@ -946,153 +938,6 @@ pub fn mix_timeline_audio_segment(
     Ok(bytes)
 }
 
-fn active_layers(project: &Project, t: f64) -> Result<Vec<ActiveLayer>, ExportError> {
-    let mut layers = Vec::new();
-
-    for track in &project.tracks {
-        if track.kind != TrackKind::Video || track.hidden {
-            continue;
-        }
-
-        let mut video_clips: Vec<&crate::project::MediaClip> = track
-            .clips
-            .iter()
-            .filter_map(|c| match c {
-                Clip::Video(v) if v.enabled && multicam_angle_active(project, v) => Some(v),
-                _ => None,
-            })
-            .collect();
-        video_clips.sort_by(|a, b| {
-            a.position_secs
-                .partial_cmp(&b.position_secs)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        // Transition window: during [cut-d, cut) emit outgoing + incoming for WGSL blend.
-        let mut handled = false;
-        for (i, v) in video_clips.iter().enumerate() {
-            let start = v.position_secs;
-            let end = start + v.timeline_duration_secs();
-            let Some(tr) = v.outgoing_transition.as_ref() else {
-                continue;
-            };
-            let d = tr.duration_secs;
-            if d <= 0.0 {
-                continue;
-            }
-            let window_start = end - d;
-            if t < window_start || t >= end {
-                continue;
-            }
-            let Some(incoming) = video_clips.get(i + 1).copied() else {
-                continue;
-            };
-            // Incoming must abut (or nearly abut) this cut for renderer-only overlap.
-            if (incoming.position_secs - end).abs() > 0.05 && incoming.position_secs < end - 1e-6 {
-                continue;
-            }
-
-            let u = ((t - window_start) / d).clamp(0.0, 1.0) as f32;
-            let out_media = project
-                .find_media(v.media_id)
-                .ok_or(ExportError::MediaNotFound(v.media_id))?;
-            let in_media = project
-                .find_media(incoming.media_id)
-                .ok_or(ExportError::MediaNotFound(incoming.media_id))?;
-            if out_media.kind != MediaKind::Video && out_media.kind != MediaKind::Image {
-                return Err(ExportError::NotVideo(v.media_id));
-            }
-            if in_media.kind != MediaKind::Video && in_media.kind != MediaKind::Image {
-                return Err(ExportError::NotVideo(incoming.media_id));
-            }
-
-            let out_xf = evaluate_transform(v, t);
-            let in_xf = evaluate_transform(incoming, incoming.position_secs);
-
-            layers.push(ActiveLayer {
-                decoder_key: track.id,
-                path: out_media.path.clone(),
-                source_time: v.source_time_at(t),
-                transform: out_xf,
-                effects: v.effects.clone(),
-                transition: Some(LayerTransition {
-                    kind: tr.kind,
-                    progress: u,
-                    is_incoming: false,
-                }),
-                mask: v.mask.clone(),
-                background_removal: v.background_removal.clone(),
-            });
-            layers.push(ActiveLayer {
-                // Distinct from track.id so FrameRenderer keeps a second decoder open.
-                decoder_key: uuid::Uuid::from_u128(track.id.as_u128() ^ 0xC0_FF_EE_51_u128),
-                path: in_media.path.clone(),
-                source_time: incoming.source_in_secs + (t - window_start) * incoming.speed_factor(),
-                transform: in_xf,
-                effects: incoming.effects.clone(),
-                transition: Some(LayerTransition {
-                    kind: tr.kind,
-                    progress: u,
-                    is_incoming: true,
-                }),
-                mask: incoming.mask.clone(),
-                background_removal: incoming.background_removal.clone(),
-            });
-            handled = true;
-            break;
-        }
-        if handled {
-            continue;
-        }
-
-        for clip in &track.clips {
-            let Clip::Video(v) = clip else { continue };
-            if !v.enabled || !multicam_angle_active(project, v) {
-                continue;
-            }
-            let start = v.position_secs;
-            let end = start + v.timeline_duration_secs();
-            if t >= start && t < end {
-                let media = project
-                    .find_media(v.media_id)
-                    .ok_or(ExportError::MediaNotFound(v.media_id))?;
-                if media.kind != MediaKind::Video && media.kind != MediaKind::Image {
-                    return Err(ExportError::NotVideo(v.media_id));
-                }
-                layers.push(ActiveLayer {
-                    decoder_key: track.id,
-                    path: media.path.clone(),
-                    source_time: v.source_time_at(t),
-                    transform: evaluate_transform(v, t),
-                    effects: v.effects.clone(),
-                    transition: None,
-                    mask: v.mask.clone(),
-                    background_removal: v.background_removal.clone(),
-                });
-                break;
-            }
-        }
-    }
-
-    Ok(layers)
-}
-
-/// True when the clip is not in a multicam group, or is the group's active angle.
-fn multicam_angle_active(project: &Project, clip: &crate::project::MediaClip) -> bool {
-    let Some(group_id) = clip.multicam_group_id else {
-        return true;
-    };
-    let Some(group) = project.multicam_groups.iter().find(|g| g.id == group_id) else {
-        return true;
-    };
-    group
-        .angle_clip_ids
-        .get(group.active_angle)
-        .copied()
-        .map(|id| id == clip.id)
-        .unwrap_or(false)
-}
-
 fn resolve_background_removal_mask(
     frame: &RgbaFrame,
     cfg: &crate::project::BackgroundRemoval,
@@ -1122,26 +967,6 @@ fn resolve_background_removal_mask(
             height: frame.height,
         },
     })
-}
-
-fn active_captions(project: &Project, t: f64) -> Vec<ActiveCaption> {
-    let mut caps = Vec::new();
-    for track in &project.tracks {
-        if track.kind != TrackKind::Caption || track.hidden {
-            continue;
-        }
-        for clip in &track.clips {
-            let Clip::Caption(c) = clip else { continue };
-            let end = c.position_secs + c.duration_secs;
-            if t >= c.position_secs && t < end {
-                caps.push(ActiveCaption {
-                    text: c.text.clone(),
-                    style_id: c.style_id.clone(),
-                });
-            }
-        }
-    }
-    caps
 }
 
 #[cfg(test)]
@@ -1412,7 +1237,7 @@ mod tests {
         project.tracks.push(track);
 
         assert!(!has_video_content(&project));
-        assert!(active_layers(&project, 0.0).unwrap().is_empty());
+        assert!(eval::active_layers(&project, 0.0).unwrap().is_empty());
     }
 
     #[test]

@@ -2,33 +2,56 @@
 //! `project` and `commands` are the contract described in docs/project-schema.md and
 //! docs/command-api.md; keep them in sync with those documents.
 
+// Modules below touch processes, the filesystem, native codecs, or sandboxed-wasm plugin
+// execution (wasmtime) and are unavailable in a wasm32 (browser) build — see
+// docs/preview-webview.md P2 for the wasm-compositor gating rationale. `project`, `compose`,
+// and `mask` are pure evaluation/compositing code and must build on both targets: the wasm
+// compositor (renderly-wasm) links against them directly for preview-parity with export.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod audio;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod captions;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod commands;
 pub mod compose;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod export;
+pub mod frame;
 pub mod mask;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod media;
 pub mod packs;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod perceive;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod plugins;
 pub mod project;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod segmentation;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use audio::{TtsError, VoiceoverProvider};
+#[cfg(not(target_arch = "wasm32"))]
 pub use commands::{apply_command, Command, CommandError, CommandOutcome};
 pub use compose::{builtin_effect_ids, BUILTIN_EFFECT_IDS};
+#[cfg(not(target_arch = "wasm32"))]
 pub use export::{
     export_project, export_project_with_progress, export_project_with_settings,
     mix_timeline_audio_range_to_file, mix_timeline_audio_segment, render_frame_at,
     timeline_duration, DecodeOptions, ExportError, ExportPhase, ExportProgress, ExportSettings,
     FrameRenderer, FrameTiming,
 };
+#[cfg(not(target_arch = "wasm32"))]
 pub use media::{generate_thumbnail_strip, ReaderOptions, ThumbnailStrip, VideoEncoderPreference};
+#[cfg(target_arch = "wasm32")]
+pub use packs::LoadedPack;
+#[cfg(not(target_arch = "wasm32"))]
 pub use packs::{load_pack, LoadedPack};
+#[cfg(not(target_arch = "wasm32"))]
 pub use perceive::{
     audio_peaks, detect_scenes, detect_silence, encode_rgba_png, transcribe_media, AnalysisError,
     AudioPeaks, PerceiveError, SceneCut, SilenceSpan, Transcript, TranscriptSegment,
 };
+#[cfg(not(target_arch = "wasm32"))]
 pub use plugins::{compile_gain_wasm, compile_invert_wasm, PluginHost};
 pub use project::Project;

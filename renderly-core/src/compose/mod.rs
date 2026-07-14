@@ -6,12 +6,14 @@
 
 mod chroma;
 pub mod effects;
+pub mod eval;
 mod transition;
 
 pub use chroma::apply_chroma_effects;
 pub use effects::{builtin_effect_ids, default_params, BUILTIN_EFFECT_IDS};
+pub use eval::{active_captions, active_layers, ActiveCaption, ActiveLayer, EvalError};
 
-use crate::media::RgbaFrame;
+use crate::frame::RgbaFrame;
 use crate::packs::LoadedPack;
 use crate::project::{ClipMask, ClipTransform, EffectInstance, TransitionKind};
 use effects::EffectProcessor;
@@ -204,6 +206,11 @@ fn upload_layer_pixels(
 }
 
 impl Compositor {
+    /// Blocking constructor used by export/CLI/MCP. Not available on wasm32 (`pollster`
+    /// can't block on a wasm event loop and adapter/device requests are async-only there);
+    /// the wasm compositor calls [`Self::new_async`] / [`Self::with_device`] directly. See
+    /// docs/preview-webview.md P2.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(width: u32, height: u32) -> Result<Self, ComposeError> {
         pollster::block_on(Self::new_async(width, height))
     }
@@ -235,6 +242,7 @@ impl Compositor {
         &self.output_view
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     async fn new_async(width: u32, height: u32) -> Result<Self, ComposeError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),

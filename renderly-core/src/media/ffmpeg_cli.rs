@@ -211,12 +211,7 @@ fn drain_stderr(stderr: std::process::ChildStderr) {
     });
 }
 
-#[derive(Debug, Clone)]
-pub struct RgbaFrame {
-    pub width: u32,
-    pub height: u32,
-    pub pixels: Vec<u8>,
-}
+pub use crate::frame::RgbaFrame;
 
 /// Decode-time scaling/pacing knobs for `VideoReader`. Used by the playback engine to
 /// decode at panel resolution (instead of full source resolution) and at the project's

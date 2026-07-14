@@ -713,6 +713,11 @@ impl EffectProcessor {
             }
         }
 
+        // Raster/Generated mattes are loaded from the filesystem via `image::open`, which is
+        // unavailable on wasm32 (no fs). Deferred for the wasm compositor per
+        // docs/preview-webview.md P2 scope limits — Luma (raw-pixel, decode-free) mattes still
+        // work on wasm; JS can decode raster mattes and feed them through as Luma bytes.
+        #[cfg(not(target_arch = "wasm32"))]
         let (pixels, width, height) = match kind {
             ClipMaskKind::Raster { path } => {
                 let img = image::open(path).map_err(|e| ComposeError::Wgpu(e.to_string()))?;
@@ -734,6 +739,22 @@ impl EffectProcessor {
                 width,
                 height,
             } => (pixels.clone(), *width, *height),
+            _ => unreachable!(),
+        };
+        #[cfg(target_arch = "wasm32")]
+        let (pixels, width, height) = match kind {
+            ClipMaskKind::Luma {
+                pixels,
+                width,
+                height,
+            } => (pixels.clone(), *width, *height),
+            ClipMaskKind::Raster { .. } | ClipMaskKind::Generated { .. } => {
+                return Err(ComposeError::Wgpu(
+                    "raster/generated mattes are not supported in the wasm preview compositor \
+                     (deferred, see docs/preview-webview.md P2); pass a Luma matte instead"
+                        .into(),
+                ));
+            }
             _ => unreachable!(),
         };
 
