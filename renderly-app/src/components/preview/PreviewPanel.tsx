@@ -6,6 +6,8 @@ import { TransportBar } from "./TransportBar";
 import { PreviewHandlesOverlay } from "./PreviewHandlesOverlay";
 import { PreviewMaskOverlay } from "./PreviewMaskOverlay";
 import { PerfHud } from "./PerfHud";
+import { WebviewPreview } from "../../preview/WebviewPreview";
+import { isWebviewPreview } from "../../preview/webviewPreviewEngine";
 
 /// Fits the project's aspect ratio inside the host, letterboxed, and sends that sub-rect
 /// (not the full host rect) to the backend — the native wgpu child window is sized to
@@ -61,7 +63,11 @@ export function PreviewPanel() {
 
   useEffect(() => {
     const host = hostRef.current;
-    if (!host || !project) return;
+    // Webview preview mode: the canvas is sized by WebviewPreview's own ResizeObserver;
+    // never call `ipc.setPreviewBounds` here — that would create the native child window
+    // (see docs/preview-webview.md item 8), which we don't want when the webview path is
+    // driving the preview.
+    if (!host || !project || isWebviewPreview()) return;
 
     let cancelled = false;
     let debounceTimer: number | null = null;
@@ -162,6 +168,9 @@ export function PreviewPanel() {
         className={`preview-host${hasClips ? " has-clips" : ""}${importBusy ? " loading" : ""}${playing ? " is-playing" : ""}`}
       >
         {hintContent && <div className="hint">{hintContent}</div>}
+        {hasClips && project && isWebviewPreview() ? (
+          <WebviewPreview hostRef={hostRef} aspect={aspect} />
+        ) : null}
         {hasClips && project ? (
           <>
             <PreviewHandlesOverlay hostRef={hostRef} aspect={aspect} />

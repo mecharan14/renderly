@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { setClipMask } from "../../lib/commands";
 import * as ipc from "../../lib/ipc";
+import { isWebviewPreview } from "../../preview/webviewPreviewEngine";
 import {
   applyMaskHandleDrag,
   boundsToEllipseKind,
@@ -155,7 +156,11 @@ export function PreviewMaskOverlay({
     return () => ro.disconnect();
   }, [hostRef, aspect, project]);
 
+  // P1 scope limit: masks are not yet composited in the webview preview (see
+  // docs/preview-webview.md item 9 / P2), so this backend-render override has nothing to
+  // show there either — skip it rather than pay the round-trip for no visible effect.
   const previewOverride = useCallback((trackId: string, clipId: string, next: ClipMask | null) => {
+    if (isWebviewPreview()) return;
     const now = performance.now();
     const drag = dragRef.current;
     if (drag && now - drag.lastPreviewMs < 40) return;

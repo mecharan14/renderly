@@ -22,6 +22,22 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
+/// P1 webview preview migration (docs/preview-webview.md item 11): the webview loads
+/// media files directly (`<video src>`/`<img src>` via `convertFileSrc`), so every media
+/// item's real filesystem path must be allow-listed on the Tauri asset protocol scope —
+/// it starts out scoped to only `$APPCACHE/media-cache/*` (see tauri.conf.json). Called
+/// whenever the session's `Project` is set or gains media (open/create/quick-start,
+/// import). Errors are logged, not propagated — a missing scope entry means "that one
+/// asset won't load," not "the project failed to open."
+fn allow_media_assets<'a>(app: &AppHandle, paths: impl Iterator<Item = &'a std::path::Path>) {
+    let scope = app.asset_protocol_scope();
+    for path in paths {
+        if let Err(e) = scope.allow_file(path) {
+            eprintln!("asset protocol: failed to allow {}: {e}", path.display());
+        }
+    }
+}
+
 struct Session {
     path: PathBuf,
     /// Shared snapshot bumped on every commit — play/seek/refresh take `Arc::clone`
@@ -271,6 +287,7 @@ impl AppState {
                     item.path.clone(),
                     item.kind,
                 );
+                allow_media_assets(app, std::iter::once(item.path.as_path()));
             }
         }
 
@@ -709,6 +726,7 @@ async fn open_project(
             item.kind,
         );
     }
+    allow_media_assets(&app, project.media.iter().map(|m| m.path.as_path()));
 
     *state.session.lock() = Some(Session {
         path: path_buf.clone(),
@@ -1371,11 +1389,30 @@ fn set_preview_bounds(
         .map_err(|e| e.to_string())
 }
 
+/// P1 webview preview migration (docs/preview-webview.md item 10): switches the playback
+/// engine between "webview" (browser decodes/presents video; this backend does audio-only
+/// playback) and "native" (the pre-migration wgpu child-window path). Called once at
+/// startup by the frontend based on `isWebviewPreview()`. Synchronous/non-blocking — just
+/// flips an `AtomicBool`, takes effect on the next `play`/`seek`/`refresh_frame`.
+#[tauri::command]
+fn set_preview_mode(state: State<AppState>, mode: String) -> Result<(), String> {
+    match mode.as_str() {
+        "webview" => state.playback.set_webview_mode(true),
+        "native" => state.playback.set_webview_mode(false),
+        other => return Err(format!("unknown preview mode: {other}")),
+    }
+    Ok(())
+}
+
 /// Start (or resume) playback from `time_secs`. Non-blocking: hands an `Arc<Project>`
 /// off to the playback worker thread and returns immediately — see playback.rs.
 #[tauri::command]
 async fn play(app: AppHandle, state: State<'_, AppState>, time_secs: f64) -> Result<(), String> {
-    ensure_preview_parent(&app, &state)?;
+    // Webview mode never presents to the native surface (see playback.rs's
+    // `run_playback_loop` doc comment) — don't create the native child window for it.
+    if !state.playback.is_webview_mode() {
+        ensure_preview_parent(&app, &state)?;
+    }
     state.set_playhead_secs(time_secs);
     let project = state.with_session(|s| Ok(Arc::clone(&s.project)))?;
     state.playback.play(app, project, time_secs);
@@ -1404,6 +1441,12 @@ async fn seek(app: AppHandle, state: State<'_, AppState>, time_secs: f64) -> Res
     if state.playback.seek_while_playing(time_secs) {
         return Ok(());
     }
+    // Webview mode: the paused-state paint is the webview canvas's own scrub redraw
+    // (`WebviewPreviewEngine.seek`) — skip the native scrub-worker render entirely, see
+    // docs/preview-webview.md item 10.
+    if state.playback.is_webview_mode() {
+        return Ok(());
+    }
     ensure_preview_parent(&app, &state)?;
     let project = state.with_session(|s| Ok(Arc::clone(&s.project)))?;
     state.playback.request_preview(app, project, time_secs);
@@ -1426,6 +1469,12 @@ async fn refresh_frame(
 ) -> Result<(), String> {
     let project = state.with_session(|s| Ok(Arc::clone(&s.project)))?;
     if state.playback.update_live_project(Arc::clone(&project)) {
+        return Ok(());
+    }
+    // Webview mode: paused-state repaint is the webview canvas's own store-subscription
+    // redraw (`WebviewPreviewEngine.notifyProjectPatched`) — see docs/preview-webview.md
+    // item 10.
+    if state.playback.is_webview_mode() {
         return Ok(());
     }
     ensure_preview_parent(&app, &state)?;
@@ -1560,6 +1609,7 @@ pub fn run() {
             export_project,
             cancel_export,
             set_preview_bounds,
+            set_preview_mode,
             play,
             pause,
             seek,

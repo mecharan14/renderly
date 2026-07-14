@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { setClipTransform } from "../../lib/commands";
 import * as ipc from "../../lib/ipc";
+import { isWebviewPreview } from "../../preview/webviewPreviewEngine";
 import {
   applyHandleDrag,
   cursorForHandle,
@@ -147,8 +148,13 @@ export function PreviewHandlesOverlay({
     return () => ro.disconnect();
   }, [hostRef, aspect, project]);
 
+  // When the webview preview is active, PreviewPanel's canvas subscribes directly to the
+  // store and redraws on every optimistic patch (`patchClipTransform` below already does
+  // that) — the backend transform-override round trip is native-preview-only machinery
+  // that would just add latency here. See docs/preview-webview.md item 7.
   const previewOverride = useCallback(
     (trackId: string, clipId: string, t: ClipTransform) => {
+      if (isWebviewPreview()) return;
       const now = performance.now();
       const drag = dragRef.current;
       if (drag && now - drag.lastPreviewMs < 40) return;
@@ -169,12 +175,14 @@ export function PreviewHandlesOverlay({
       if (cancel || !drag.moved) {
         // Restore the pre-drag state; nothing to commit.
         patchClipTransform(drag.trackId, drag.clipId, drag.startTransform);
-        void ipc.previewTransformOverride(
-          drag.trackId,
-          drag.clipId,
-          drag.startTransform,
-          useEditorStore.getState().playhead,
-        );
+        if (!isWebviewPreview()) {
+          void ipc.previewTransformOverride(
+            drag.trackId,
+            drag.clipId,
+            drag.startTransform,
+            useEditorStore.getState().playhead,
+          );
+        }
         return;
       }
       const projectNow = useEditorStore.getState().project;

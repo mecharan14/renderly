@@ -140,6 +140,12 @@ pub struct PlaybackEngine {
     scrub_pending: Arc<Mutex<Option<ScrubRequest>>>,
     _scrub_thread: JoinHandle<()>,
     play_epoch: Arc<AtomicU64>,
+    /// P1 webview preview migration (docs/preview-webview.md item 10): when set, the play
+    /// loop does audio-only work (premix + `playback:tick`) and skips all video decode/
+    /// compose/present — the webview renders video itself via `<video>` elements, and the
+    /// native preview surface may not even exist in this mode. Set once at startup by the
+    /// frontend's `set_preview_mode` call, mirrored from `isWebviewPreview()`.
+    webview_mode: std::sync::atomic::AtomicBool,
 }
 
 impl PlaybackEngine {
@@ -156,7 +162,16 @@ impl PlaybackEngine {
             scrub_pending,
             _scrub_thread: scrub_thread,
             play_epoch,
+            webview_mode: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    pub fn set_webview_mode(&self, webview: bool) {
+        self.webview_mode.store(webview, Ordering::SeqCst);
+    }
+
+    pub fn is_webview_mode(&self) -> bool {
+        self.webview_mode.load(Ordering::SeqCst)
     }
 
     /// Preview-panel height in pixels; playback decodes video layers downscaled to this
@@ -291,6 +306,7 @@ impl PlaybackEngine {
         let current_time_clone = Arc::clone(&current_time);
         let project_clone = Arc::clone(&project);
         let start_secs = start_secs.max(0.0);
+        let webview_mode = self.is_webview_mode();
 
         let thread = thread::spawn(move || {
             run_playback_loop(
@@ -303,6 +319,7 @@ impl PlaybackEngine {
                 stop_clone,
                 seek_clone,
                 current_time_clone,
+                webview_mode,
             );
         });
 
@@ -379,24 +396,32 @@ fn run_playback_loop(
     stop: Arc<AtomicUsize>,
     seek: Arc<Mutex<Option<f64>>>,
     current_time: Arc<Mutex<f64>>,
+    webview_mode: bool,
 ) {
-    let (mut renderer, gpu_present) = {
+    // P1 webview preview migration: in webview mode the browser decodes/presents video
+    // itself, so this loop does audio-only work (premix + tick emission) and never
+    // touches a `FrameRenderer` or the native preview surface at all — which may not even
+    // be initialized in this mode (see `AppState`/`ensure_preview_parent` call sites in
+    // lib.rs, which are skipped for `play`/`seek`/`refresh_frame` when webview mode is on).
+    let mut renderer: Option<(FrameRenderer, bool)> = if webview_mode {
+        None
+    } else {
         let shared = app
             .state::<crate::AppState>()
             .preview
             .lock()
             .shared_device();
-        match shared {
+        let built = match shared {
             Some((device, queue)) => {
                 match FrameRenderer::with_device(device, queue, settings, decode_opts) {
-                    Ok(r) => (r, true),
+                    Ok(r) => Some((r, true)),
                     Err(e) => {
                         eprintln!(
                             "playback: shared-device renderer init failed ({e}); falling back"
                         );
-                        match FrameRenderer::new(settings, decode_opts) {
-                            Ok(r) => (r, false),
-                            Err(e) => {
+                        FrameRenderer::new(settings, decode_opts)
+                            .map(|r| Some((r, false)))
+                            .unwrap_or_else(|e| {
                                 eprintln!("playback: frame renderer init failed: {e}");
                                 let _ = app.emit(
                                     "playback:state",
@@ -411,15 +436,14 @@ fn run_playback_loop(
                                         message: format!("Could not start playback: {e}"),
                                     },
                                 );
-                                return;
-                            }
-                        }
+                                None
+                            })
                     }
                 }
             }
-            None => match FrameRenderer::new(settings, decode_opts) {
-                Ok(r) => (r, false),
-                Err(e) => {
+            None => FrameRenderer::new(settings, decode_opts)
+                .map(|r| Some((r, false)))
+                .unwrap_or_else(|e| {
                     eprintln!("playback: frame renderer init failed: {e}");
                     let _ = app.emit(
                         "playback:state",
@@ -434,10 +458,15 @@ fn run_playback_loop(
                             message: format!("Could not start playback: {e}"),
                         },
                     );
-                    return;
-                }
-            },
+                    None
+                }),
+        };
+        // Renderer init failure is fatal to a *native* play session (nothing to present),
+        // matching the original early-`return` behavior.
+        if built.is_none() {
+            return;
         }
+        built
     };
 
     let finish = |t: f64| {
@@ -631,88 +660,92 @@ fn run_playback_loop(
 
             *current_time.lock() = t;
 
-            let frame_start = Instant::now();
-            if gpu_present {
-                match renderer.render_to_texture(&project.lock(), t) {
-                    Ok(timing) => {
-                        let state = app.state::<crate::AppState>();
-                        let present_start = Instant::now();
-                        let result = state
-                            .preview
-                            .lock()
-                            .present_texture_view(renderer.output_view());
-                        let present_ms = present_start.elapsed().as_secs_f64() * 1000.0;
-                        if let Err(e) = result {
-                            eprintln!("playback: present failed at {t:.3}s: {e}");
+            // Webview mode: no `FrameRenderer`, no native surface — this loop's only job
+            // is audio pacing + tick emission (see `renderer`'s doc comment above).
+            if let Some((renderer, gpu_present)) = renderer.as_mut() {
+                let frame_start = Instant::now();
+                if *gpu_present {
+                    match renderer.render_to_texture(&project.lock(), t) {
+                        Ok(timing) => {
+                            let state = app.state::<crate::AppState>();
+                            let present_start = Instant::now();
+                            let result = state
+                                .preview
+                                .lock()
+                                .present_texture_view(renderer.output_view());
+                            let present_ms = present_start.elapsed().as_secs_f64() * 1000.0;
+                            if let Err(e) = result {
+                                eprintln!("playback: present failed at {t:.3}s: {e}");
+                                if last_error_emit.elapsed() >= Duration::from_secs(2) {
+                                    let _ = app.emit(
+                                        "playback:error",
+                                        PlaybackErrorEvent {
+                                            message: format!("Preview present failed: {e}"),
+                                        },
+                                    );
+                                    last_error_emit = Instant::now();
+                                }
+                            }
+                            let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+                            perf.record(timing, present_ms, frame_ms);
+                        }
+                        Err(e) => {
+                            eprintln!("playback: render failed at {t:.3}s: {e}");
                             if last_error_emit.elapsed() >= Duration::from_secs(2) {
                                 let _ = app.emit(
                                     "playback:error",
                                     PlaybackErrorEvent {
-                                        message: format!("Preview present failed: {e}"),
+                                        message: format!("Playback render failed: {e}"),
                                     },
                                 );
                                 last_error_emit = Instant::now();
                             }
                         }
-                        let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
-                        perf.record(timing, present_ms, frame_ms);
                     }
-                    Err(e) => {
-                        eprintln!("playback: render failed at {t:.3}s: {e}");
-                        if last_error_emit.elapsed() >= Duration::from_secs(2) {
-                            let _ = app.emit(
-                                "playback:error",
-                                PlaybackErrorEvent {
-                                    message: format!("Playback render failed: {e}"),
-                                },
+                } else {
+                    match renderer.render_timed(&project.lock(), t) {
+                        Ok((pixels, timing)) => {
+                            let state = app.state::<crate::AppState>();
+                            let present_start = Instant::now();
+                            let result = state.preview.lock().present_rgba(
+                                &pixels,
+                                settings.width,
+                                settings.height,
                             );
-                            last_error_emit = Instant::now();
+                            let present_ms = present_start.elapsed().as_secs_f64() * 1000.0;
+                            if let Err(e) = result {
+                                eprintln!("playback: present failed at {t:.3}s: {e}");
+                                if last_error_emit.elapsed() >= Duration::from_secs(2) {
+                                    let _ = app.emit(
+                                        "playback:error",
+                                        PlaybackErrorEvent {
+                                            message: format!("Preview present failed: {e}"),
+                                        },
+                                    );
+                                    last_error_emit = Instant::now();
+                                }
+                            }
+                            let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+                            perf.record(timing, present_ms, frame_ms);
                         }
-                    }
-                }
-            } else {
-                match renderer.render_timed(&project.lock(), t) {
-                    Ok((pixels, timing)) => {
-                        let state = app.state::<crate::AppState>();
-                        let present_start = Instant::now();
-                        let result = state.preview.lock().present_rgba(
-                            &pixels,
-                            settings.width,
-                            settings.height,
-                        );
-                        let present_ms = present_start.elapsed().as_secs_f64() * 1000.0;
-                        if let Err(e) = result {
-                            eprintln!("playback: present failed at {t:.3}s: {e}");
+                        Err(e) => {
+                            eprintln!("playback: render failed at {t:.3}s: {e}");
                             if last_error_emit.elapsed() >= Duration::from_secs(2) {
                                 let _ = app.emit(
                                     "playback:error",
                                     PlaybackErrorEvent {
-                                        message: format!("Preview present failed: {e}"),
+                                        message: format!("Playback render failed: {e}"),
                                     },
                                 );
                                 last_error_emit = Instant::now();
                             }
                         }
-                        let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
-                        perf.record(timing, present_ms, frame_ms);
-                    }
-                    Err(e) => {
-                        eprintln!("playback: render failed at {t:.3}s: {e}");
-                        if last_error_emit.elapsed() >= Duration::from_secs(2) {
-                            let _ = app.emit(
-                                "playback:error",
-                                PlaybackErrorEvent {
-                                    message: format!("Playback render failed: {e}"),
-                                },
-                            );
-                            last_error_emit = Instant::now();
-                        }
                     }
                 }
-            }
 
-            if let Some(event) = perf.maybe_drain() {
-                let _ = app.emit("playback:perf", event);
+                if let Some(event) = perf.maybe_drain() {
+                    let _ = app.emit("playback:perf", event);
+                }
             }
 
             if last_tick_emit.elapsed() >= TICK_INTERVAL {

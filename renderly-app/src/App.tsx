@@ -12,11 +12,16 @@ import { connectStoreToBackendEvents } from "./store/editorStore";
 import * as ipc from "./lib/ipc";
 import { importFromPath } from "./lib/projectFlows";
 import { handleGlobalKeyDown } from "./lib/actions";
+import { isWebviewPreview } from "./preview/webviewPreviewEngine";
 
 export function App() {
   const [exportOpen, setExportOpen] = useState(false);
 
   useEffect(() => connectStoreToBackendEvents(), []);
+
+  useEffect(() => {
+    void ipc.setPreviewMode(isWebviewPreview() ? "webview" : "native").catch(() => {});
+  }, []);
 
   useEffect(() => {
     const unsubDrop = ipc.onDragDrop((paths) => {

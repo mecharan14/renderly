@@ -9,11 +9,16 @@ const sampleProject: Project = {
   id: "mock-project",
   name: "Ultra Bruno ep.12",
   settings: { fps: 60, width: 1080, height: 1920, sample_rate: 48000, duck_db: -12 },
+  // NOTE: paths here are only ever resolved through `convertFileSrc` below (the harness
+  // maps them to the real generated clips in dev-assets/ served at the site root by
+  // vite.harness.config.ts's `publicDir`) — durations/dims match those real files
+  // (1920x1080@60, 12s) so timeline eval (source_in/out) lines up with what actually
+  // decodes. See docs/preview-webview.md "Harness verification".
   media: [
-    { id: "m-round1", path: "C:/clips/round1.mp4", kind: "video", duration_secs: 42, width: 1920, height: 1080, fps: 60 },
-    { id: "m-killcam", path: "C:/clips/kill-cam.mp4", kind: "video", duration_secs: 18, width: 1920, height: 1080, fps: 60 },
-    { id: "m-round2", path: "C:/clips/round2.mp4", kind: "video", duration_secs: 55, width: 1920, height: 1080, fps: 60 },
-    { id: "m-facecam", path: "C:/clips/facecam.mp4", kind: "video", duration_secs: 60, width: 1280, height: 720, fps: 30 },
+    { id: "m-round1", path: "C:/clips/round1.mp4", kind: "video", duration_secs: 12, width: 1920, height: 1080, fps: 60 },
+    { id: "m-killcam", path: "C:/clips/kill-cam.mp4", kind: "video", duration_secs: 12, width: 1920, height: 1080, fps: 60 },
+    { id: "m-round2", path: "C:/clips/round2.mp4", kind: "video", duration_secs: 12, width: 1920, height: 1080, fps: 60 },
+    { id: "m-facecam", path: "C:/clips/facecam.mp4", kind: "video", duration_secs: 12, width: 1920, height: 1080, fps: 60 },
     { id: "m-vo", path: "C:/audio/vo-take2.wav", kind: "audio", duration_secs: 65, width: null, height: null, fps: null },
     { id: "m-bgm", path: "C:/audio/bgm-loop.mp3", kind: "audio", duration_secs: 90, width: null, height: null, fps: null },
     { id: "m-logo", path: "C:/img/logo.png", kind: "image", duration_secs: null, width: 512, height: 512, fps: null },
@@ -65,10 +70,62 @@ const extensionCatalog = {
 
 let revision = 1;
 
+// ---- Tiny event bus so `listen` actually delivers events (P1 harness upgrade —
+// see docs/preview-webview.md "Harness verification"). Real Tauri's `listen` subscribes
+// to backend-emitted events; here `emit` (below) is the only producer, driven by the
+// mock `play`/`pause`/`seek` handling.
+type Listener = (payload: unknown) => void;
+const listeners = new Map<string, Set<Listener>>();
+
+function emit(event: string, payload: unknown): void {
+  for (const cb of listeners.get(event) ?? []) cb(payload);
+}
+
+// ---- Mock playback clock: `play` starts a ~33ms interval emitting `playback:tick` /
+// `playback:state` (mirrors the real backend's TICK_INTERVAL, see playback.rs) so the
+// harness can exercise WebviewPreviewEngine's tick drift-correction path in addition to
+// its pure-rAF fallback. `pause` stops it.
+let playTimer: ReturnType<typeof setInterval> | null = null;
+let mockTimeSecs = 0;
+
+function stopMockPlayback(): number {
+  if (playTimer != null) {
+    clearInterval(playTimer);
+    playTimer = null;
+  }
+  return mockTimeSecs;
+}
+
+function startMockPlayback(fromSecs: number): void {
+  stopMockPlayback();
+  mockTimeSecs = fromSecs;
+  const start = performance.now();
+  const base = fromSecs;
+  playTimer = setInterval(() => {
+    mockTimeSecs = base + (performance.now() - start) / 1000;
+    emit("playback:tick", { time_secs: mockTimeSecs, playing: true });
+  }, 33);
+  emit("playback:state", { playing: true, time_secs: fromSecs });
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function invoke<T = unknown>(cmd: string, _args?: any): Promise<T> {
+export function invoke<T = unknown>(cmd: string, args?: any): Promise<T> {
   const reply = (v: unknown) => Promise.resolve(v as T);
   switch (cmd) {
+    case "set_preview_mode":
+      return reply(undefined);
+    case "play":
+      startMockPlayback((args?.timeSecs as number) ?? 0);
+      return reply(undefined);
+    case "pause": {
+      const t = stopMockPlayback();
+      emit("playback:state", { playing: false, time_secs: t });
+      return reply(t);
+    }
+    case "seek": {
+      mockTimeSecs = (args?.timeSecs as number) ?? mockTimeSecs;
+      return reply(undefined);
+    }
     case "list_projects":
       return reply([
         { path: "C:/proj/ep12.renderly.json", name: "Ultra Bruno ep.12", durationSecs: 84, modifiedMs: Date.now() - 7.2e6, width: 1080, height: 1920, fps: 60 },
@@ -98,8 +155,6 @@ export function invoke<T = unknown>(cmd: string, _args?: any): Promise<T> {
       return reply({ can_undo: true, can_redo: true, revision, patch: [] });
     case "get_media_assets":
       return reply({});
-    case "pause":
-      return reply(0);
     case "project_thumbnail":
       return reply(null);
     default:
@@ -107,13 +162,35 @@ export function invoke<T = unknown>(cmd: string, _args?: any): Promise<T> {
   }
 }
 
+// Maps the sample project's fake media paths to the two real, visually-distinct clips
+// generated by ffmpeg into renderly-app/dev-assets/ (served at the site root by
+// vite.harness.config.ts's `publicDir: "dev-assets"`) — see docs/preview-webview.md
+// "Harness verification". Round1/round2 → clip-a (testsrc2, colorful test pattern);
+// kill-cam/facecam → clip-b (smptebars) so a cut between tracks/clips is visibly
+// distinguishable by sampling a pixel.
+const REAL_CLIP_BY_PATH: Record<string, string> = {
+  "C:/clips/round1.mp4": "/clip-a.mp4",
+  "C:/clips/round2.mp4": "/clip-a.mp4",
+  "C:/clips/kill-cam.mp4": "/clip-b.mp4",
+  "C:/clips/facecam.mp4": "/clip-b.mp4",
+};
+
 export function convertFileSrc(path: string): string {
-  return path;
+  return REAL_CLIP_BY_PATH[path] ?? path;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function listen<T = unknown>(_event: string, _cb: (e: { payload: T }) => void): Promise<() => void> {
-  return Promise.resolve(() => {});
+export function listen<T = unknown>(event: string, cb: (e: { payload: T }) => void): Promise<() => void> {
+  const wrapped: Listener = (payload) => cb({ payload: payload as T });
+  let set = listeners.get(event);
+  if (!set) {
+    set = new Set();
+    listeners.set(event, set);
+  }
+  set.add(wrapped);
+  return Promise.resolve(() => {
+    set!.delete(wrapped);
+  });
 }
 
 const noop = () => Promise.resolve();

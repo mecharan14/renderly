@@ -11,6 +11,12 @@ const mock = fileURLToPath(new URL("./src/dev/tauriMock.ts", import.meta.url));
 export default defineConfig({
   plugins: [react()],
   clearScreen: false,
+  // Harness-only: serves renderly-app/dev-assets/*.mp4 (generated locally with ffmpeg,
+  // gitignored) at the site root so tauriMock's convertFileSrc can point the sample
+  // project's video media at real, browser-decodable files — see
+  // docs/preview-webview.md "Harness verification". Never touches vite.config.ts /
+  // the production build.
+  publicDir: "dev-assets",
   resolve: {
     alias: [
       { find: "@tauri-apps/api/core", replacement: mock },

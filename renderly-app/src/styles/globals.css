@@ -939,6 +939,13 @@ body {
   background: var(--stage-bg-0);
 }
 
+.preview-webview-canvas {
+  position: absolute;
+  z-index: 0;
+  pointer-events: none;
+  background: var(--stage-bg-0);
+}
+
 .preview-handles-overlay {
   position: absolute;
   z-index: 5;

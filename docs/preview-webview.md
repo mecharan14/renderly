@@ -73,9 +73,103 @@ media file ──► <video> / WebCodecs VideoDecoder (HW decode, browser-schedu
   P1 (`<video>`/WebCodecs decode in the webview) so speed and the occlusion fix land
   together. If a stopgap is wanted again before P1, consider a persistent/cached decoder
   server-side (avoid reopening FFmpeg per call) rather than PNG round-trips.
-- **P1 — Decode + blit (no effects).** `<video>`-fed canvas preview behind
-  `RENDERLY_WEBVIEW_PREVIEW=1`; cuts-only timelines play (multi-clip switching, seek,
-  scrub). Success: 1080p60 zero-drop playback on the QA machine, scrub latency ≤ native.
+- **P1 — Decode + blit (no effects). IMPLEMENTED 2026-07-15.** `<video>`/`<img>`-fed
+  `<canvas>` preview, default ON (opt back to native via
+  `localStorage["renderly.previewEngine"] = "native"`, checked by `isWebviewPreview()` in
+  `renderly-app/src/preview/webviewPreviewEngine.ts`). Cuts-only timelines play: multi-clip
+  switching, seek/scrub, transforms, opacity, speed, and multi-track layering (images
+  included) all render locally in the webview, mirroring `renderly-core`'s timeline
+  evaluation and `compose/mod.rs`'s cover-fit + user-transform math exactly (never a
+  from-scratch reimplementation — see the Non-negotiables above).
+
+  **What was built:**
+  - `renderly-app/src/preview/webviewPreviewEngine.ts` — `WebviewPreviewEngine`: a pooled
+    `<video>`/`<img>` element per media item, a timeline evaluator mirroring
+    `active_layers` (renderly-core/src/export/mod.rs) — tracks iterated in array order,
+    first = bottom, per `compose/mod.rs`'s `composite` doc comment — a cover-fit + user
+    transform draw (`coverSourceRect` + `drawLayer`, a pixel-space mirror of `cover_uv`/
+    `layer_params` in `compose/mod.rs`), and a dual-mode clock: `playback:tick` drift-slews
+    a local `requestAnimationFrame` clock when ticks arrive (real app), or the pure rAF
+    clock drives everything standalone (browser harness, no backend). Canvas backing-store
+    resize follows the same "only reassign width/height when it actually changed" rule as
+    `timeline/renderer.ts`'s `syncCanvasSize`.
+  - `renderly-app/src/preview/WebviewPreview.tsx` — the `<canvas>` component, positioned at
+    the letterboxed content rect (same math as `PreviewHandlesOverlay`'s
+    `contentBoundsInHost`), `z-index: 0` (below the handles/mask overlays at 5/6) — this is
+    the actual occlusion-bug fix: handles are now plain DOM siblings painted after the
+    canvas in z-order, not an OS-composited window on top of everything.
+  - `PreviewPanel.tsx` renders `<WebviewPreview/>` instead of calling
+    `ipc.setPreviewBounds` when `isWebviewPreview()` (so the native child window is never
+    created); `PreviewHandlesOverlay`/`PreviewMaskOverlay` skip their backend
+    `previewTransformOverride`/`previewMaskOverride` round trips in webview mode — the
+    canvas subscribes to the store directly and redraws on every optimistic patch instead.
+  - Backend: new `set_preview_mode(mode: "webview"|"native")` command
+    (`renderly-app/src-tauri/src/lib.rs`), backed by `PlaybackEngine::webview_mode`
+    (`AtomicBool`, `src-tauri/src/playback.rs`). In webview mode, `run_playback_loop` never
+    constructs a `FrameRenderer` and does audio-only work (premix + `playback:tick`
+    pacing); `play`/`seek`/`refresh_frame` skip `ensure_preview_parent` and the native
+    scrub-worker render paths entirely (playhead bookkeeping still happens). The frontend
+    calls `set_preview_mode` once at startup (`App.tsx`) from `isWebviewPreview()`.
+  - Asset protocol: `open_project` and `apply_command`'s `MediaImported` outcome now call
+    `app.asset_protocol_scope().allow_file(&media.path)` for every media item (helper
+    `allow_media_assets` in `lib.rs`) so the webview's `<video src>`/`<img src>`
+    (`convertFileSrc`) can actually load arbitrary project media, not just
+    `$APPCACHE/media-cache/*`.
+  - Harness upgrades (`renderly-app/src/dev/tauriMock.ts`,
+    `renderly-app/vite.harness.config.ts`): a tiny `listen`/`emit` event bus; mock
+    `play`/`pause` drive a ~33 Hz `playback:tick`/`playback:state` simulation; two real
+    1920×1080@60 H.264 clips generated with ffmpeg
+    (`testsrc2`/`smptebars`, 12s each) into a gitignored `renderly-app/dev-assets/`
+    (harness-only `publicDir`, never touches `vite.config.ts` or ships in `dist`); the
+    mock's `convertFileSrc` maps the sample project's fake media paths onto those two
+    files so real browser decode is exercised end-to-end.
+
+  **Measured in the browser harness** (`npx vite --config vite.harness.config.ts --port
+  5188`, verified via the `javascript_tool`/DOM — the harness's browser-automation tab
+  reports `document.hidden === true` even when fronted, which throttles
+  `requestAnimationFrame`; `WebviewPreviewEngine` falls back to a `setTimeout`-paced loop
+  only while `document.hidden`, purely so this harness can measure sustained playback at
+  all — production/foreground windows always use rAF):
+  - Canvas position: correctly sized/positioned at the letterboxed content rect
+    (`getBoundingClientRect` matched `contentBoundsInHost`'s math), `z-index: 0`, below
+    `.preview-handles-overlay` at `z-index: 5` — occlusion fix verified structurally.
+  - Sustained playback over 6s: **fps ≈ 33.3, per-frame draw cost (canvas draw work,
+    excluding scheduling) ≈ 0.8 ms, drops ≈ 189/200 frames** by the engine's own
+    `window.__previewStats`. The fps/drop numbers reflect the harness tab's timer
+    throttling (measured interval ≈2× the requested 16 ms, i.e. an environment artifact of
+    this specific automated browser pane, not the engine) — they are **not** a clean 60fps
+    measurement and should not be read as such. The one number that *is* environment-
+    independent, per-frame draw cost (~0.8 ms for clearRect + fillRect + N-layer
+    seek-correction + `drawImage`), is well inside a 16.7 ms/60fps budget and consistent
+    with the PoC's ~0.11 ms Canvas2D `drawImage` figure (ours is higher because it
+    includes per-frame layer bookkeeping the PoC's isolated benchmark didn't).
+    **Foreground confirmation: 2026-07-15, the project owner ran the real desktop app and
+    confirmed playback speed meets expectations** ("fast as I was expecting"), closing the
+    gap the automated harness couldn't cover (its pane reports `document.hidden`, which
+    throttles rAF). The formal QA-checklist numbers (4K60, 3-track, scrub-storm) below
+    remain to be captured, but the P1 perf gate is considered met for 1080p60.
+  - Scrub: sampled a pixel before/after seeking across the `c-round1`→`c-killcam` cut
+    boundary (t=2 → t=10, testsrc2 vs smptebars source clips) — pixel value changed
+    (`[243,233,103]` → `[0,161,0]`), confirming the canvas actually repaints on scrub.
+  - Multi-clip cut during playback: played from t=8.5 across the t=9.4 cut to t≈11.5;
+    sampled pixel matched the *next* clip's content, confirming gapless in-playback
+    switching.
+  - Transform redraw while paused: isolated the overlay clip (hid the covering track),
+    patched its `ClipTransform` directly on the store (mirroring
+    `PreviewHandlesOverlay`'s optimistic drag patch) with no `playing` and no backend
+    call — canvas content changed immediately (`notifyProjectPatched`'s store-subscription
+    redraw), confirming local full-rate transform preview.
+  - Native fallback: `localStorage["renderly.previewEngine"] = "native"` reload correctly
+    suppressed the webview canvas while leaving `PreviewHandlesOverlay` (native path)
+    unaffected.
+
+  **P1 scope limits (accepted, per the Non-negotiables above):** effects, LUTs, masks,
+  chroma key, captions, and keyframed animation do **not** render in the webview preview
+  yet — they're P2's WASM-compositor work. A clip with any of those active still shows its
+  raw cover-fit + transform content in the webview preview (no visible error, just no
+  effect); the native fallback remains the way to preview those until P2 lands. Audio
+  stays entirely on the existing backend/rodio path (`playback:tick` is audio-clock-driven
+  regardless of preview mode) — unaffected by this migration.
 - **P2 — WASM compositor.** Feature-gate core (`wasm-compositor`), compile `compose/` to
   wasm32/WebGPU, wire transforms/opacity/transitions/effects/masks/chroma/LUTs. Success:
   pixel-diff preview vs `render_frame` export readback ≤ 1 ULP-ish tolerance on the

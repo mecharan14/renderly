@@ -295,6 +295,14 @@ export function assetUrl(path: string): string {
 
 // ---- Preview / playback ----
 
+/// P1 webview preview migration (docs/preview-webview.md): tells the backend which mode
+/// the frontend is rendering in. "webview" makes the play loop skip all video decode/
+/// present work (audio-only + `playback:tick`); "native" is the pre-migration behavior.
+/// Called once at startup from `App.tsx` based on `isWebviewPreview()`.
+export function setPreviewMode(mode: "webview" | "native"): Promise<void> {
+  return invoke("set_preview_mode", { mode });
+}
+
 export function setPreviewBounds(
   x: number,
   y: number,

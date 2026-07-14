@@ -39,3 +39,7 @@ Thumbs.db
 # Scratch
 /scratch/
 /tmp/
+
+# Harness-only test media (docs/preview-webview.md P1 harness verification) — generated
+# locally with ffmpeg, never shipped or committed.
+renderly-app/dev-assets/
