@@ -12,7 +12,7 @@
 // The element pool, dual-mode clock (backend playback:tick slew / standalone rAF),
 // pre-seek, and seek-correction logic below are shared by both modes.
 
-import type { Clip, ClipTransform, MediaClip, MediaItem, Project } from "../lib/types";
+import type { Clip, ClipTransform, MediaClip, MediaItem, Project, Track } from "../lib/types";
 import { IDENTITY_TRANSFORM, clipDurationSecs } from "../lib/types";
 
 /// Minimal structural type for renderly-wasm's WasmCompositor (the real .d.ts lives in the
@@ -99,18 +99,55 @@ function activeLayersAt(project: Project, t: number): ActiveLayer[] {
   return layers;
 }
 
+/// If `clip` is the INCOMING side of some other clip's `outgoing_transition` on the same
+/// track (same adjacency test as `transitionIncomingLayers`/eval.rs), returns the transition
+/// window's start time (`cut - duration`). Used so pre-seeking anchors on when the blend
+/// window opens rather than the cut point itself — see `upcomingLayers`.
+function transitionWindowStartFor(track: Track, clip: MediaClip): number | null {
+  const clips = (track.clips as Clip[])
+    .filter((c): c is MediaClip => c.type === "video" && c.enabled)
+    .sort((a, b) => a.position_secs - b.position_secs);
+  for (let i = 0; i < clips.length; i++) {
+    const v = clips[i];
+    const tr = v.outgoing_transition;
+    if (!tr || tr.duration_secs <= 0) continue;
+    const incoming = clips[i + 1];
+    if (!incoming || incoming.id !== clip.id) continue;
+    const end = v.position_secs + clipDurationSecs(v);
+    if (Math.abs(incoming.position_secs - end) > 0.05 && incoming.position_secs < end - 1e-6) {
+      continue;
+    }
+    return end - tr.duration_secs;
+  }
+  return null;
+}
+
 /// Look ahead a little past `t` on the same tracks to find the *next* clip about to
 /// become active, so its <video> can be pre-seeked before the cut lands (gapless cuts).
+///
+/// BUG B fix: for a clip that is the INCOMING side of a transition, the frame that actually
+/// needs to be ready is the one at the transition WINDOW's start (`cut - duration`), which
+/// can be well before the clip's nominal `position_secs` for short transitions on a long
+/// clip run — `transitionIncomingLayers` starts managing/seeking the element the instant the
+/// window opens, so if pre-seek hasn't primed it by then the element is unready for that
+/// frame and the compositor silently drops that side of the blend (looks like "transition
+/// doesn't render"). Anchor the pre-seek horizon on the window start instead of the clip
+/// start for such clips.
 function upcomingLayers(project: Project, t: number, horizonSecs: number): ActiveLayer[] {
   const layers: ActiveLayer[] = [];
   for (const track of project.tracks) {
     if (track.kind !== "video" || track.hidden) continue;
     let best: MediaClip | null = null;
+    let bestAnchor = Infinity;
     for (const clip of track.clips as Clip[]) {
       if (clip.type !== "video" || !clip.enabled) continue;
-      const startsIn = clip.position_secs - t;
+      const anchor = transitionWindowStartFor(track, clip) ?? clip.position_secs;
+      const startsIn = anchor - t;
       if (startsIn > 0 && startsIn <= horizonSecs) {
-        if (!best || clip.position_secs < best.position_secs) best = clip;
+        if (!best || anchor < bestAnchor) {
+          best = clip;
+          bestAnchor = anchor;
+        }
       }
     }
     if (!best) continue;
@@ -219,6 +256,11 @@ export class WebviewPreviewEngine {
 
   private videoPool = new Map<string, HTMLVideoElement>();
   private imgPool = new Map<string, HTMLImageElement>();
+  /// Cleanup functions for the 'seeked'/'loadeddata' listeners attached to each pooled
+  /// video (see `reconcileMediaElements`) — BUG A fix: nothing previously listened for a
+  /// seek to actually finish, so a paused scrub composited whatever the mid-seek element
+  /// had (often nothing → black) and never redrew once the decoded frame landed.
+  private videoListenerCleanup = new Map<string, () => void>();
 
   private playing = false;
   private clockBaseSecs = 0;
@@ -399,6 +441,19 @@ export class WebviewPreviewEngine {
           el.style.display = "none";
           document.body.appendChild(el);
           this.videoPool.set(media.id, el);
+          // BUG A fix: redraw once a paused scrub's seek actually lands a decoded frame,
+          // and once metadata/data first becomes available (covers the case where the
+          // element wasn't seekable yet when `manageElements` first set currentTime).
+          const onReady = () => {
+            if (this.disposed || this.playing) return;
+            this.drawFrame(this.pausedTimeSecs);
+          };
+          el.addEventListener("seeked", onReady);
+          el.addEventListener("loadeddata", onReady);
+          this.videoListenerCleanup.set(media.id, () => {
+            el.removeEventListener("seeked", onReady);
+            el.removeEventListener("loadeddata", onReady);
+          });
         }
       } else if (media.kind === "image") {
         wanted.add(media.id);
@@ -411,6 +466,8 @@ export class WebviewPreviewEngine {
     }
     for (const [id, el] of this.videoPool) {
       if (!wanted.has(id)) {
+        this.videoListenerCleanup.get(id)?.();
+        this.videoListenerCleanup.delete(id);
         el.pause();
         el.removeAttribute("src");
         el.load();
@@ -482,9 +539,13 @@ export class WebviewPreviewEngine {
     this.clockBasePerf = now;
   }
 
-  /// Paused-state scrub: set the target time, seek any active video (redraw fires on its
-  /// 'seeked' event so the paint reflects the actually-decoded frame), and draw
-  /// immediately too so a cached/instant seek doesn't wait.
+  /// Paused-state scrub: set the target time, seek any active video (`manageElements` sets
+  /// `.currentTime`; `reconcileMediaElements` attaches 'seeked'/'loadeddata' listeners, and
+  /// `manageElements` additionally arms a `requestVideoFrameCallback` per seek, either of
+  /// which redraws once the actually-decoded frame lands), and draw immediately too so a
+  /// cached/instant seek doesn't wait. `drawFrame` itself skips compositing (keeping the
+  /// prior canvas contents) for any frame where a managed video is still mid-seek, so a
+  /// scrub never presents a black/stale frame — see `manageElements`'s return value.
   ///
   /// Also handles a scrub *during* playback (BUG 3): previously this early-returned while
   /// `this.playing` without touching the clock at all, so the local rAF clock kept
@@ -535,7 +596,20 @@ export class WebviewPreviewEngine {
 
     const project = this.project;
     const active = project ? activeLayersAt(project, t) : [];
-    if (project) this.manageElements(project, t, active);
+    const managedReady = project ? this.manageElements(project, t, active) : true;
+
+    // BUG A fix (part 2): while paused, if any managed active video layer is mid-seek or
+    // hasn't decoded a frame at its target time yet, do NOT composite this frame — the GPU
+    // path would upload a stale/blank texture (looks like a black flash) and the Canvas2D
+    // path would clear-then-skip the layer (same visible black). Leave the canvas exactly
+    // as it was; the `seeked`/`loadeddata` listeners (or rVFC) attached in
+    // `reconcileMediaElements`/`manageElements` re-invoke `drawFrame` at
+    // `this.pausedTimeSecs` — always the LATEST scrub target, never a stale intermediate
+    // one — once the real frame is ready, so scrub-storms coalesce onto the final position.
+    if (!this.playing && !managedReady) {
+      this.lastDrawT = performance.now() - drawStart;
+      return;
+    }
 
     if (this.gpu) {
       // GPU path: hand every pooled element to the wasm compositor keyed by media id —
@@ -607,12 +681,34 @@ export class WebviewPreviewEngine {
     }
   }
 
+  /// Registers a one-off `requestVideoFrameCallback` (where supported — Chromium/Tauri's
+  /// webview; Firefox lacks it) to redraw as soon as this video actually presents a new
+  /// decoded frame, which fires earlier/more precisely than the 'seeked' event. The
+  /// 'seeked'/'loadeddata' listeners attached in `reconcileMediaElements` remain as the
+  /// fallback for browsers without rVFC and as a backstop if this callback is ever missed.
+  private scheduleVideoFrameCallback(video: HTMLVideoElement): void {
+    const rvfc = (
+      video as HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => number }
+    ).requestVideoFrameCallback;
+    if (typeof rvfc !== "function") return;
+    rvfc.call(video, () => {
+      if (this.disposed || this.playing) return;
+      this.drawFrame(this.pausedTimeSecs);
+    });
+  }
+
   /// Shared element management for both render modes: pre-seek upcoming clips, pause
   /// inactive videos, and keep each active video's currentTime/playbackRate/play-state in
   /// sync with the timeline. In webgpu mode this ALSO covers transition-incoming clips
   /// (see `transitionIncomingLayers`) so both sides of a WGSL transition blend have live
   /// decoded frames.
-  private manageElements(project: Project, t: number, active: ActiveLayer[]): void {
+  ///
+  /// Returns whether every managed ACTIVE video layer (i.e. one that will actually be
+  /// composited this frame — not pre-seek lookahead) currently has a decoded frame ready at
+  /// its target time (`readyState >= 2` and not mid-seek). BUG A fix: the caller uses this to
+  /// skip compositing rather than presenting a black/stale frame while a paused scrub's seek
+  /// is still in flight.
+  private manageElements(project: Project, t: number, active: ActiveLayer[]): boolean {
     const managed = this.gpu ? [...active, ...transitionIncomingLayers(project, t)] : active;
     const activeIds = new Set(managed.map((l) => l.media.id));
     // See `seek()`'s doc comment: right after a scrub-during-playback rebase, hold off on
@@ -627,6 +723,7 @@ export class WebviewPreviewEngine {
       if (Math.abs(video.currentTime - upcoming.sourceTimeSecs) > SEEK_CORRECT_THRESHOLD_SECS) {
         try {
           video.currentTime = upcoming.sourceTimeSecs;
+          if (!this.playing) this.scheduleVideoFrameCallback(video);
         } catch {
           /* not seekable yet (metadata not loaded) — next frame will retry */
         }
@@ -638,23 +735,33 @@ export class WebviewPreviewEngine {
       if (!activeIds.has(id) && !video.paused) video.pause();
     }
 
+    let allReady = true;
     for (const layer of managed) {
       if (layer.media.kind !== "video") continue;
       const video = this.videoPool.get(layer.media.id);
-      if (!video || video.readyState < 2) continue;
+      if (!video || video.readyState < 2) {
+        allReady = false;
+        continue;
+      }
       const speed = layer.clip.speed && layer.clip.speed > 0 ? layer.clip.speed : 1;
       if (video.playbackRate !== speed) video.playbackRate = speed;
       const drift = Math.abs(video.currentTime - layer.sourceTimeSecs);
       if (!suppressDrift && drift > SEEK_CORRECT_THRESHOLD_SECS) {
         try {
           video.currentTime = layer.sourceTimeSecs;
+          if (!this.playing) this.scheduleVideoFrameCallback(video);
         } catch {
           /* ignore */
         }
       }
       if (this.playing && video.paused) void video.play().catch(() => {});
       if (!this.playing && !video.paused) video.pause();
+      // Re-check AFTER the possible currentTime write above: assigning `.currentTime` sets
+      // `.seeking` synchronously per spec, so this catches the seek we may have just
+      // triggered, not just one already in flight from a previous frame.
+      if (video.seeking) allReady = false;
     }
+    return allReady;
   }
 
   private drawLayer(
@@ -695,6 +802,8 @@ export class WebviewPreviewEngine {
       }
       this.gpu = null;
     }
+    for (const cleanup of this.videoListenerCleanup.values()) cleanup();
+    this.videoListenerCleanup.clear();
     for (const v of this.videoPool.values()) {
       v.pause();
       v.removeAttribute("src");
