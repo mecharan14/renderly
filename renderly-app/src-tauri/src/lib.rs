@@ -38,6 +38,19 @@ fn allow_media_assets<'a>(app: &AppHandle, paths: impl Iterator<Item = &'a std::
     }
 }
 
+/// Generated thumbnail strips/waveform-adjacent files now live in a project-local sidecar
+/// directory (`media_assets::assets_dir_for_project`) rather than only the single
+/// `$APPCACHE/media-cache` dir statically scoped in tauri.conf.json, so that directory must
+/// be allow-listed too, recursively (new files land in it continuously as generation
+/// completes). Idempotent — safe to call on every project open/create/quick-start and every
+/// import, same as `allow_media_assets`.
+fn allow_media_assets_dir(app: &AppHandle, dir: &std::path::Path) {
+    let scope = app.asset_protocol_scope();
+    if let Err(e) = scope.allow_directory(dir, true) {
+        eprintln!("asset protocol: failed to allow dir {}: {e}", dir.display());
+    }
+}
+
 struct Session {
     path: PathBuf,
     /// Shared snapshot bumped on every commit — play/seek/refresh take `Arc::clone`
@@ -281,12 +294,20 @@ impl AppState {
 
         if let CommandOutcome::MediaImported { media_id } = &outcome {
             if let Some(item) = project.find_media(*media_id) {
-                media_assets::request_assets(
-                    app.clone(),
-                    media_id.to_string(),
-                    item.path.clone(),
-                    item.kind,
-                );
+                let session_path = self.with_session(|s| Ok(s.path.clone())).ok();
+                let assets_dir = media_assets::resolve_cache_dir(app, session_path.as_deref());
+                if let Ok(dir) = &assets_dir {
+                    allow_media_assets_dir(app, dir);
+                }
+                if let Ok(dir) = assets_dir {
+                    media_assets::request_assets(
+                        app.clone(),
+                        media_id.to_string(),
+                        item.path.clone(),
+                        item.kind,
+                        dir,
+                    );
+                }
                 allow_media_assets(app, std::iter::once(item.path.as_path()));
             }
         }
@@ -639,6 +660,10 @@ async fn quick_start_project(app: AppHandle, state: State<'_, AppState>) -> Resu
     .await
     .map_err(|e| e.to_string())??;
 
+    if let Ok(dir) = media_assets::resolve_cache_dir(&app, Some(path_buf.as_path())) {
+        allow_media_assets_dir(&app, &dir);
+    }
+
     *state.session.lock() = Some(Session {
         path: path_buf.clone(),
         project: Arc::new(project),
@@ -684,6 +709,10 @@ async fn new_project(
     .await
     .map_err(|e| e.to_string())??;
 
+    if let Ok(dir) = media_assets::resolve_cache_dir(&app, Some(path_buf.as_path())) {
+        allow_media_assets_dir(&app, &dir);
+    }
+
     *state.session.lock() = Some(Session {
         path: path_buf.clone(),
         project: Arc::new(project),
@@ -717,13 +746,18 @@ async fn open_project(
 
     // Kick off (cache-hit-cheap) asset generation for every media item already in this
     // project — not just newly-imported ones — so reopening a project shows filmstrips/
-    // waveforms without the user re-triggering anything.
+    // waveforms without the user re-triggering anything. Resolved once per open (not per
+    // item): the project-local sidecar dir next to `path_buf`, see
+    // `media_assets::resolve_cache_dir`.
+    let assets_dir = media_assets::resolve_cache_dir(&app, Some(path_buf.as_path()))?;
+    allow_media_assets_dir(&app, &assets_dir);
     for item in &project.media {
         media_assets::request_assets(
             app.clone(),
             item.id.to_string(),
             item.path.clone(),
             item.kind,
+            assets_dir.clone(),
         );
     }
     allow_media_assets(&app, project.media.iter().map(|m| m.path.as_path()));
@@ -849,8 +883,12 @@ async fn delete_project(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let path = PathBuf::from(&path);
         let thumb = project_thumb_path(&path);
+        let assets_dir = media_assets::assets_dir_for_project(&path);
         std::fs::remove_file(&path).map_err(|e| e.to_string())?;
         let _ = std::fs::remove_file(thumb);
+        // Generated thumbnail-strip/waveform sidecar assets are project-local (see
+        // media_assets module doc) and useless once the project is gone.
+        let _ = std::fs::remove_dir_all(assets_dir);
         Ok(())
     })
     .await
@@ -913,13 +951,17 @@ async fn request_media_assets(
     media_id: String,
 ) -> Result<(), String> {
     let id: uuid::Uuid = media_id.parse().map_err(|e: uuid::Error| e.to_string())?;
-    let item = state.with_session(|s| {
-        s.project
+    let (item, session_path) = state.with_session(|s| {
+        let item = s
+            .project
             .find_media(id)
             .cloned()
-            .ok_or_else(|| format!("media not found: {media_id}"))
+            .ok_or_else(|| format!("media not found: {media_id}"))?;
+        Ok((item, s.path.clone()))
     })?;
-    media_assets::request_assets(app, media_id, item.path, item.kind);
+    let dir = media_assets::resolve_cache_dir(&app, Some(session_path.as_path()))?;
+    allow_media_assets_dir(&app, &dir);
+    media_assets::request_assets(app, media_id, item.path, item.kind, dir);
     Ok(())
 }
 
@@ -933,13 +975,16 @@ async fn get_media_assets(
     media_id: String,
 ) -> Result<media_assets::MediaAssetsPayload, String> {
     let id: uuid::Uuid = media_id.parse().map_err(|e: uuid::Error| e.to_string())?;
-    let path = state.with_session(|s| {
-        s.project
+    let (path, session_path) = state.with_session(|s| {
+        let path = s
+            .project
             .find_media(id)
             .map(|m| m.path.clone())
-            .ok_or_else(|| format!("media not found: {media_id}"))
+            .ok_or_else(|| format!("media not found: {media_id}"))?;
+        Ok((path, s.path.clone()))
     })?;
-    media_assets::get_cached(&app, &media_id, &path)
+    let dir = media_assets::resolve_cache_dir(&app, Some(session_path.as_path()))?;
+    media_assets::get_cached(&app, &media_id, &path, &dir)
 }
 
 #[derive(Clone, serde::Serialize)]

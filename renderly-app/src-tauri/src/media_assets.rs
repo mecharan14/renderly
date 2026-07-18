@@ -6,6 +6,28 @@
 //! by `(path, mtime)` so re-opening the same project doesn't regenerate anything, and
 //! delivered to the frontend via `media:thumbnails-ready` / `media:waveform-ready` events
 //! (or synchronously via `get_media_assets` if a cache entry already exists).
+//!
+//! ## Cache location: project-local sidecar directory
+//!
+//! Generated assets live next to the project file, not in a single global app-cache
+//! directory — otherwise every "reopen an existing project" is a coin flip on whether the
+//! OS has since cleared the app cache, and two projects sharing a media file fight over
+//! the same global entry. The convention (mirrors `project_thumb_path` in `lib.rs`, which
+//! does the same next-to-the-project trick for the home-screen gallery thumb): for a
+//! project file `Foo.renderly.json`, its sidecar directory is `Foo.renderly-assets/` in
+//! the same folder (`file_stem()` — `"Foo.renderly"` — plus `-assets`). See
+//! [`assets_dir_for_project`]. Content-keying within that directory is unchanged
+//! (`cache_key`, a hash of the media path + mtime), so a media file renamed or re-imported
+//! into the same project still hits.
+//!
+//! Callers resolve the directory once per operation via [`resolve_cache_dir`], which falls
+//! back to the old global `$APPCACHE/media-cache` dir when there is no project path yet
+//! (there always is one in this codebase — every session-creating command writes its
+//! project file to disk immediately — but this keeps the module correct even if that
+//! invariant ever changes). [`generate_assets_blocking`] additionally migrates a hit from
+//! that old global cache into the sidecar directory the first time it's asked to look at a
+//! project-local dir that doesn't have the entry yet, so upgrading doesn't force a
+//! regeneration wave.
 
 use renderly_core::project::MediaKind;
 use renderly_core::{audio_peaks, generate_thumbnail_strip};
@@ -71,7 +93,9 @@ pub struct MediaAssetsPayload {
     waveform: Option<WaveformReadyEvent>,
 }
 
-fn cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
+/// The old global cache dir — still used as a fallback when no project path is available
+/// yet, and as a migration source (see module doc comment).
+fn global_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_cache_dir()
@@ -79,6 +103,56 @@ fn cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .join("media-cache");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
+}
+
+/// Sidecar assets directory for a project file: `Foo.renderly.json` → `Foo.renderly-assets/`
+/// next to it. See the module doc comment for the full rationale.
+pub fn assets_dir_for_project(project_path: &Path) -> PathBuf {
+    let stem = project_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("project");
+    let mut dir = project_path.to_path_buf();
+    dir.set_file_name(format!("{stem}-assets"));
+    dir
+}
+
+/// Resolve (and create) the cache directory generation/lookup should use for the current
+/// session: the project-local sidecar dir when a project path is known, otherwise the old
+/// global app-cache dir.
+pub fn resolve_cache_dir(app: &AppHandle, project_path: Option<&Path>) -> Result<PathBuf, String> {
+    match project_path {
+        Some(p) => {
+            let dir = assets_dir_for_project(p);
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            Ok(dir)
+        }
+        None => global_cache_dir(app),
+    }
+}
+
+/// If `dir` (a resolved project-local sidecar) is missing the cache entry for `key` but the
+/// old global cache dir has it, copy it over so it isn't regenerated. No-op (and cheap) once
+/// migrated, since the caller only calls this on a cache miss in `dir`.
+fn migrate_from_global_cache(app: &AppHandle, dir: &Path, key: &str) {
+    let Ok(old_dir) = global_cache_dir(app) else {
+        return;
+    };
+    if old_dir == dir {
+        return;
+    }
+    let old_meta = old_dir.join(format!("{key}.json"));
+    if !old_meta.is_file() {
+        return;
+    }
+    let new_meta = dir.join(format!("{key}.json"));
+    if std::fs::copy(&old_meta, &new_meta).is_err() {
+        return;
+    }
+    let old_strip = old_dir.join(format!("{key}.png"));
+    if old_strip.is_file() {
+        let _ = std::fs::copy(&old_strip, dir.join(format!("{key}.png")));
+    }
 }
 
 /// Not a cryptographic hash — this only needs to be a stable, collision-unlikely cache
@@ -154,13 +228,16 @@ fn generate_assets_blocking(
     media_id: &str,
     path: &Path,
     kind: MediaKind,
+    dir: &Path,
 ) -> Result<(), String> {
-    let dir = cache_dir(app)?;
     let key = cache_key(path);
     let meta_path = dir.join(format!("{key}.json"));
 
+    if read_cached(&meta_path).is_none() {
+        migrate_from_global_cache(app, dir, &key);
+    }
     if let Some(cached) = read_cached(&meta_path) {
-        emit_ready(app, media_id, &dir, &cached);
+        emit_ready(app, media_id, dir, &cached);
         return Ok(());
     }
 
@@ -194,7 +271,7 @@ fn generate_assets_blocking(
                     interval_secs: strip.interval_secs,
                 });
                 let _ = write_cached(&meta_path, &cached);
-                emit_thumbnails(app, media_id, &dir, &cached);
+                emit_thumbnails(app, media_id, dir, &cached);
             }
             Err(e) => eprintln!("media assets: thumbnail generation failed for {media_id}: {e}"),
         }
@@ -205,7 +282,7 @@ fn generate_assets_blocking(
         cached.peaks = peaks;
         cached.bucket_secs = bucket_secs;
         write_cached(&meta_path, &cached)?;
-        emit_waveform(app, media_id, &dir, &cached);
+        emit_waveform(app, media_id, dir, &cached);
     } else {
         write_cached(&meta_path, &cached)?;
     }
@@ -215,12 +292,19 @@ fn generate_assets_blocking(
 
 /// Kick off thumbnail/waveform generation for one media item in the background. Safe to
 /// call redundantly (e.g. once per media item on every project open) — a cache hit is a
-/// cheap file read, not a re-run of ffmpeg.
-pub fn request_assets(app: AppHandle, media_id: String, path: PathBuf, kind: MediaKind) {
+/// cheap file read, not a re-run of ffmpeg. `dir` is the already-resolved cache directory
+/// for the current project — see [`resolve_cache_dir`].
+pub fn request_assets(
+    app: AppHandle,
+    media_id: String,
+    path: PathBuf,
+    kind: MediaKind,
+    dir: PathBuf,
+) {
     tauri::async_runtime::spawn(async move {
         let media_id_for_log = media_id.clone();
         let result = tauri::async_runtime::spawn_blocking(move || {
-            generate_assets_blocking(&app, &media_id, &path, kind)
+            generate_assets_blocking(&app, &media_id, &path, kind, &dir)
         })
         .await;
         if let Ok(Err(e)) = result {
@@ -231,17 +315,50 @@ pub fn request_assets(app: AppHandle, media_id: String, path: PathBuf, kind: Med
 
 /// Whatever's already cached for `path`, synchronously, with no generation triggered —
 /// for the frontend to check on-demand (e.g. a media item added to the bin mid-session by
-/// something other than the normal import flow).
+/// something other than the normal import flow, or as a fallback pull after a project
+/// reopen in case the push event raced the frontend's listener setup). `dir` is the
+/// already-resolved cache directory for the current project — see [`resolve_cache_dir`].
+/// Also attempts the old-global-cache migration on a miss, same as generation, so a pull
+/// alone (no generation needed) still upgrades an entry into the sidecar dir.
 pub fn get_cached(
     app: &AppHandle,
     media_id: &str,
     path: &Path,
+    dir: &Path,
 ) -> Result<MediaAssetsPayload, String> {
-    let dir = cache_dir(app)?;
     let key = cache_key(path);
     let meta_path = dir.join(format!("{key}.json"));
+    if read_cached(&meta_path).is_none() {
+        migrate_from_global_cache(app, dir, &key);
+    }
     Ok(match read_cached(&meta_path) {
-        Some(cached) => to_payload(&dir, &cached, media_id),
+        Some(cached) => to_payload(dir, &cached, media_id),
         None => MediaAssetsPayload::default(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidecar_dir_next_to_dotted_project_filename() {
+        let project = Path::new("/home/user/Projects/Foo.renderly.json");
+        let dir = assets_dir_for_project(project);
+        assert_eq!(dir, Path::new("/home/user/Projects/Foo.renderly-assets"));
+    }
+
+    #[test]
+    fn sidecar_dir_preserves_parent_directory() {
+        let project = Path::new("C:/Users/me/Videos/My Edit.renderly.json");
+        let dir = assets_dir_for_project(project);
+        assert_eq!(dir, Path::new("C:/Users/me/Videos/My Edit.renderly-assets"));
+    }
+
+    #[test]
+    fn sidecar_dir_handles_extensionless_filename() {
+        let project = Path::new("/tmp/Untitled");
+        let dir = assets_dir_for_project(project);
+        assert_eq!(dir, Path::new("/tmp/Untitled-assets"));
+    }
 }
