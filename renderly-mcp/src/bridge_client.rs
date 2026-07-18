@@ -71,7 +71,20 @@ fn pid_alive(pid: u32) -> bool {
     }
     #[cfg(unix)]
     {
-        Path::new(&format!("/proc/{pid}")).exists()
+        // `kill(pid, 0)` is the portable Unix liveness check. `/proc/{pid}` only exists
+        // on Linux — macOS/BSD have no such path, so a procfs probe falsely reports
+        // every pid as dead there.
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        let rc = unsafe { kill(pid as i32, 0) };
+        if rc == 0 {
+            true
+        } else {
+            // ESRCH → gone. EPERM → exists but not signalable → still alive.
+            // Any other errno: treat as alive and let TCP decide.
+            std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound
+        }
     }
     #[cfg(not(any(windows, unix)))]
     {
