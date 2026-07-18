@@ -909,7 +909,7 @@ async fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
                     .then(|| thumb.to_string_lossy().into_owned()),
             });
         }
-        out.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms));
+        out.sort_by_key(|b| std::cmp::Reverse(b.modified_ms));
         Ok(out)
     })
     .await
