@@ -134,6 +134,21 @@ pub struct ApplyCommandRequest {
     pub command: serde_json::Value,
 }
 
+/// Parse the `command` tool parameter into a `Command`, accepting both a bare JSON object
+/// and a JSON-encoded string. Claude Code's MCP client serialises `serde_json::Value`
+/// parameters as a JSON string (the schema carries no explicit `type: object`), while
+/// other clients send the object directly — both shapes must work. Callers re-serialise
+/// the parsed command before forwarding (e.g. to the live bridge) so downstream always
+/// sees a canonical object.
+fn parse_command_param(value: &serde_json::Value) -> Result<Command, String> {
+    match value {
+        serde_json::Value::String(s) => {
+            serde_json::from_str(s).map_err(|e| format!("invalid command JSON: {e}"))
+        }
+        v => serde_json::from_value(v.clone()).map_err(|e| format!("invalid command JSON: {e}")),
+    }
+}
+
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ExportRequest {
     pub output_path: String,
@@ -270,13 +285,15 @@ impl RenderlyMcp {
     }
 
     fn apply_command_impl(&self, req: ApplyCommandRequest) -> Result<String, String> {
-        let cmd: Command = serde_json::from_value(req.command.clone())
-            .map_err(|e| format!("invalid command JSON: {e}"))?;
+        let cmd = parse_command_param(&req.command)?;
+        // Re-serialise the parsed command so the bridge always receives a JSON object,
+        // not the raw (possibly string-encoded) value the MCP client sent us.
+        let cmd_value = serde_json::to_value(&cmd).map_err(|e| format!("internal error: {e}"))?;
         self.with_live_or_headless(
             |client| {
                 let result = Self::block_on_bridge(async {
                     client
-                        .call("apply_command", json!({ "command": req.command }))
+                        .call("apply_command", json!({ "command": cmd_value }))
                         .await
                 })?;
                 // Keep the MCP-side session mirror fresh for perception tools that stay headless.
@@ -599,6 +616,26 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async { tokio::spawn(async move { f() }).await.unwrap() });
+    }
+
+    #[test]
+    fn parse_command_param_accepts_object_and_string() {
+        let object = serde_json::json!({ "command": "AddTrack", "kind": "video", "name": "V1" });
+        let as_object = parse_command_param(&object).expect("bare object parses");
+        // Claude Code's MCP client sends Value params as a JSON-encoded STRING — the
+        // regression this pins is that both shapes must produce the same Command.
+        let as_string = parse_command_param(&serde_json::Value::String(object.to_string()))
+            .expect("JSON-encoded string parses");
+        assert_eq!(
+            serde_json::to_value(&as_object).unwrap(),
+            serde_json::to_value(&as_string).unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_command_param_rejects_garbage() {
+        assert!(parse_command_param(&serde_json::Value::String("not json".into())).is_err());
+        assert!(parse_command_param(&serde_json::json!({ "command": "NoSuchCommand" })).is_err());
     }
 
     #[test]
