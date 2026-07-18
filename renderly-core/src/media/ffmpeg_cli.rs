@@ -633,14 +633,14 @@ impl Drop for VideoReader {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum VideoEncoderPreference {
-    /// Probe NVENC/QSV then fall back to libx264 (default).
+    /// Probe NVENC/QSV at runtime (one-frame encode), then fall back to libx264.
     #[default]
     Auto,
     /// Force software H.264 (`libx264`).
     Software,
-    /// Prefer `h264_nvenc` (falls back to software if unavailable).
+    /// Prefer `h264_nvenc` (falls back to software if unavailable or probe fails).
     Nvenc,
-    /// Prefer `h264_qsv` (falls back to software if unavailable).
+    /// Prefer `h264_qsv` (falls back to software if unavailable or probe fails).
     Qsv,
 }
 
@@ -655,6 +655,12 @@ pub struct VideoEncodeConfig {
 }
 
 static COMPILED_ENCODERS: OnceLock<Vec<String>> = OnceLock::new();
+/// Whether a one-frame probe of `h264_nvenc` actually produced a usable MP4. Compile-time
+/// listing (`ffmpeg -encoders`) is not enough — BtbN/static builds often advertise NVENC
+/// even on GPU-less CI runners, and picking it then yields BrokenPipe mid-write.
+static NVENC_WORKS: OnceLock<bool> = OnceLock::new();
+/// Same as [`NVENC_WORKS`] for `h264_qsv`.
+static QSV_WORKS: OnceLock<bool> = OnceLock::new();
 
 fn compiled_encoders() -> &'static [String] {
     COMPILED_ENCODERS.get_or_init(|| {
@@ -695,27 +701,72 @@ enum ResolvedVideoCodec {
     H264Qsv,
 }
 
+/// Encode a single 16×16 black frame with `codec` to verify the hardware path works.
+/// Cached per process via [`NVENC_WORKS`] / [`QSV_WORKS`] — failures are systemic
+/// (missing GPU/driver), not per-export.
+fn probe_hw_encoder(codec: ResolvedVideoCodec) -> bool {
+    let path = std::env::temp_dir().join(format!(
+        "renderly-enc-probe-{}-{}.mp4",
+        std::process::id(),
+        match codec {
+            ResolvedVideoCodec::H264Nvenc => "nvenc",
+            ResolvedVideoCodec::H264Qsv => "qsv",
+            ResolvedVideoCodec::Libx264 => return true,
+        }
+    ));
+    let config = VideoEncodeConfig {
+        width: 16,
+        height: 16,
+        fps: 30.0,
+        // Unused by `spawn` — codec is passed explicitly.
+        preference: VideoEncoderPreference::Software,
+        crf: 23,
+    };
+    let Ok(mut enc) = VideoEncoder::spawn(&path, &config, codec) else {
+        let _ = std::fs::remove_file(&path);
+        return false;
+    };
+    let black = vec![0u8; 16 * 16 * 4];
+    if enc.write_frame(&black).is_err() {
+        let _ = std::fs::remove_file(&path);
+        return false;
+    }
+    let ok = enc.finish().is_ok();
+    let _ = std::fs::remove_file(&path);
+    ok
+}
+
+fn hw_encoder_works(codec: ResolvedVideoCodec) -> bool {
+    match codec {
+        ResolvedVideoCodec::Libx264 => true,
+        ResolvedVideoCodec::H264Nvenc => *NVENC_WORKS.get_or_init(|| probe_hw_encoder(codec)),
+        ResolvedVideoCodec::H264Qsv => *QSV_WORKS.get_or_init(|| probe_hw_encoder(codec)),
+    }
+}
+
+/// Pick a codec that is both compiled in *and* verified to work at runtime.
 fn resolve_video_encoder(pref: VideoEncoderPreference) -> ResolvedVideoCodec {
     match pref {
         VideoEncoderPreference::Software => ResolvedVideoCodec::Libx264,
         VideoEncoderPreference::Nvenc => {
-            if encoder_available("h264_nvenc") {
+            if encoder_available("h264_nvenc") && hw_encoder_works(ResolvedVideoCodec::H264Nvenc) {
                 ResolvedVideoCodec::H264Nvenc
             } else {
                 ResolvedVideoCodec::Libx264
             }
         }
         VideoEncoderPreference::Qsv => {
-            if encoder_available("h264_qsv") {
+            if encoder_available("h264_qsv") && hw_encoder_works(ResolvedVideoCodec::H264Qsv) {
                 ResolvedVideoCodec::H264Qsv
             } else {
                 ResolvedVideoCodec::Libx264
             }
         }
         VideoEncoderPreference::Auto => {
-            if encoder_available("h264_nvenc") {
+            if encoder_available("h264_nvenc") && hw_encoder_works(ResolvedVideoCodec::H264Nvenc) {
                 ResolvedVideoCodec::H264Nvenc
-            } else if encoder_available("h264_qsv") {
+            } else if encoder_available("h264_qsv") && hw_encoder_works(ResolvedVideoCodec::H264Qsv)
+            {
                 ResolvedVideoCodec::H264Qsv
             } else {
                 ResolvedVideoCodec::Libx264
@@ -769,11 +820,21 @@ pub struct VideoEncoder {
 }
 
 impl VideoEncoder {
+    /// Open an encoder, probing NVENC/QSV at runtime on first use when preference is
+    /// Auto/Nvenc/Qsv and falling back to libx264 if the hardware path fails.
     pub fn open(output_path: &Path, config: &VideoEncodeConfig) -> Result<Self, FfmpegCliError> {
+        let codec = resolve_video_encoder(config.preference);
+        Self::spawn(output_path, config, codec)
+    }
+
+    fn spawn(
+        output_path: &Path,
+        config: &VideoEncodeConfig,
+        codec: ResolvedVideoCodec,
+    ) -> Result<Self, FfmpegCliError> {
         let width = config.width;
         let height = config.height;
         let fps = config.fps;
-        let codec = resolve_video_encoder(config.preference);
         let mut args: Vec<String> = [
             "-hide_banner",
             "-loglevel",
@@ -865,6 +926,13 @@ impl VideoEncoder {
             return Err(FfmpegCliError::NonZeroExit(status.code().unwrap_or(-1)));
         }
         Ok(())
+    }
+}
+
+impl Drop for VideoEncoder {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 

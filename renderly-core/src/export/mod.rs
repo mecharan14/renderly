@@ -1042,14 +1042,19 @@ mod tests {
                 ..Default::default()
             }));
 
-        export_project(
+        export_project_with_settings(
             &project,
             &output_path,
-            ExportPreset::Custom {
+            ExportSettings {
                 width: 320,
                 height: 240,
                 fps: 30.0,
+                // Force software so CI (GPU-less runners with NVENC-advertising FFmpeg
+                // builds) doesn't depend on hardware encode probing.
+                video_encoder: crate::media::VideoEncoderPreference::Software,
+                ..Default::default()
             },
+            &mut |_| true,
         )
         .expect("export");
 
@@ -1101,13 +1106,15 @@ mod tests {
                 ..Default::default()
             }));
 
-        let err = export_project_with_progress(
+        let err = export_project_with_settings(
             &project,
             &output_path,
-            ExportPreset::Custom {
+            ExportSettings {
                 width: 320,
                 height: 240,
                 fps: 30.0,
+                video_encoder: crate::media::VideoEncoderPreference::Software,
+                ..Default::default()
             },
             &mut |_| false,
         )
