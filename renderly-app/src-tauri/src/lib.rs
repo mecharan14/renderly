@@ -863,9 +863,13 @@ fn project_thumb_path(project_path: &std::path::Path) -> PathBuf {
 }
 
 #[tauri::command]
-async fn list_projects() -> Result<Vec<ProjectSummary>, String> {
-    tauri::async_runtime::spawn_blocking(|| -> Result<Vec<ProjectSummary>, String> {
+async fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<ProjectSummary>, String> {
         let dir = default_projects_dir()?;
+        // Gallery-card thumbs live next to the project files in the projects dir — outside
+        // the statically scoped $APPCACHE/media-cache — so the asset protocol must be told
+        // about them or the webview's <img> fetch 403s and cards render blank.
+        allow_media_assets_dir(&app, &dir);
         if !dir.is_dir() {
             return Ok(Vec::new());
         }
@@ -948,10 +952,14 @@ async fn delete_project(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn project_thumbnail(path: String) -> Result<Option<String>, String> {
+async fn project_thumbnail(app: AppHandle, path: String) -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<Option<String>, String> {
         let path = PathBuf::from(&path);
         let thumb = project_thumb_path(&path);
+        // See list_projects: the thumb lives outside the static asset-protocol scope.
+        // Allowed here too (not just there) so a freshly (re)generated thumb loads even if
+        // this command ever runs before/without a list_projects call.
+        allow_media_assets(&app, std::iter::once(thumb.as_path()));
         // Regenerate when missing OR stale (project file mtime newer than the cached thumb)
         // — a card that's just missing its thumb and one whose project changed since the
         // last render both need a fresh render; only an up-to-date thumb short-circuits.
