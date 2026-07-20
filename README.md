@@ -2,146 +2,146 @@
   <img src="assets/logo-with-text-1200.png" alt="Renderly" width="600">
 </p>
 
-# Renderly
+<p align="center">
+  <a href="https://github.com/mecharan14/renderly/actions/workflows/ci.yml"><img src="https://github.com/mecharan14/renderly/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0"></a>
+  <img src="https://img.shields.io/badge/platform-Windows%20%C2%B7%20macOS%2FLinux%20CI-2f7bf2" alt="Platforms">
+  <img src="https://img.shields.io/badge/engine-Rust%20%2B%20wgpu%20%2B%20FFmpeg-orange" alt="Engine">
+</p>
 
-**An open-source, native video editor built for AI agents — and the humans who finish the job.**
+<h3 align="center">The open-source video editor built for AI agents — and the humans who finish the job.</h3>
 
-Renderly is a from-scratch, cross-platform video editor aimed at closing the gap between
-free and workflows currently locked behind paywalled editors. It has two goals that
-reinforce each other:
+<p align="center">
+Tell an agent what you want. Watch it edit in your timeline, live. Press Ctrl+Z when you disagree.
+</p>
 
-1. Every single edit operation is driven through one command API, so an AI agent (Claude
-   Code, or any other model via MCP) can do the entire ideate → clip → order → caption →
-   voiceover pass on its own, with a human doing final polish at the end.
-2. The feature set — effects, transitions, filters, stickers, captions styles — is built
-   by its community as plugins and asset packs, not gated behind a subscription.
+---
 
-Not affiliated with, endorsed by, or a clone of any existing commercial editor.
+## Why Renderly exists
+
+Editing to a script in a commercial editor works — but the features that make it fast sit behind
+subscriptions, and none of it is scriptable by the AI tools you already use. Renderly is built
+on two bets that reinforce each other:
+
+1. **Every edit is a command.** One command API drives the GUI, the CLI, and the MCP server
+   identically — so an agent can do the entire ideate → clip → order → caption → voiceover pass
+   on its own, and a human polishes the result with normal editing.
+2. **The feature set belongs to the community.** Effects, transitions, caption styles, and
+   stickers ship as sandboxed WASM plugins and no-code asset packs — not as a paywall.
+
+Not affiliated with, endorsed by, or a clone of any commercial editor.
+
+## What makes it different
+
+- **Agents edit your open project, live.** With the desktop app running, an MCP-connected agent
+  (Claude Code, or anything that speaks MCP) discovers the app over a loopback bridge and edits
+  the same session you're looking at: clips land in the timeline instantly, the preview updates,
+  its changes share **your undo stack** (Ctrl+Z undoes the agent), and `render_frame` shows the
+  agent the exact pixels you see.
+- **One compositor, everywhere.** The preview is renderly-core's real compositor — the same
+  Rust/WGSL that renders your export — compiled to WebAssembly + WebGPU. Effects, transitions,
+  masks, keyframes, and burned-in captions look identical in preview and output, at 60 fps on
+  1080p60 footage, because they are the same code.
+- **Agent perception, not just mutation.** Scene detection, silence detection, audio peaks,
+  transcripts, and frame rendering are first-class MCP tools — an agent can *watch and listen*
+  to your footage before deciding where to cut.
+- **Local-first AI.** Whisper captions and Piper voiceover run on your machine; cloud TTS is
+  strictly bring-your-own-key. Nothing leaves your computer unless you send it.
+- **A timeline that behaves like a pro NLE.** CapCut-style layer ordering (what stacks higher
+  overlaps in frame), drag-to-reorder tracks, magnetic snapping, group operations, transition
+  badges, filmstrip thumbnails and waveforms, keyframe curves — in a dark-first UI designed for
+  long sessions.
 
 ## Status
 
-**Early / pre-alpha — Phases 0–3 complete, Phase 4 heuristics landed, polish push underway.**
-CLI and MCP drive the full command API. Export renders video with burned-in captions,
-mixed audio, speed/atempo, transitions, and effects. The Tauri desktop app (Windows)
-provides the GUI with a professionally themed dark-first UI, a CapCut-style project home
-screen (date-named projects, auto-save, live thumbnails), and a **webview preview driven
-by the real Rust compositor compiled to WebAssembly/WebGPU** — the same effect/transition
-code paths as export, at 60 fps. A loopback **live bridge** lets an MCP agent edit the
-project while the app is open: changes appear in the GUI instantly and share the user's
-undo stack. macOS/Linux CI builds the workspace.
+**Pre-alpha, moving fast.** Phases 0–3 of [PLAN.md](PLAN.md) are complete; Phase 4's parity
+march (background removal, motion tracking, stabilization, auto-reframe, templates, multicam)
+has heuristic implementations landed, with ML upgrades on hold. Recent highlights: the WebGPU
+preview migration (native child-window preview retired), live caption burn-in in preview,
+project home screen with auto-save and self-refreshing thumbnails, and the live agent bridge
+running end-to-end. Current workstreams: [docs/improvement-plan.md](docs/improvement-plan.md).
 
-Examples: [`examples/packs/starter`](examples/packs/starter),
-[`examples/plugins/invert`](examples/plugins/invert),
-[`examples/registry`](examples/registry). Manual QA: [docs/qa-checklist.md](docs/qa-checklist.md).
+Windows is the primary target today; macOS/Linux build in CI and are next in line for runtime QA.
 
-Read [PLAN.md](PLAN.md) for the full vision and roadmap, and
-[docs/improvement-plan.md](docs/improvement-plan.md) for the current perf/UX workstreams,
-before contributing or building on this.
-
-## Why
-
-Editing gameplay footage to a script in a paywalled editor works, but too many of the
-features that make it fast — the ones that actually matter — sit behind a subscription.
-Renderly is an attempt to build the same caliber of editor as free, open, and automatable
-software, so the tool decides nothing about what you're allowed to do.
-
-## Architecture at a glance
+## Architecture
 
 ```
-renderly-core/     headless Rust engine — project model, command API, media I/O, compositing.
-                    No UI dependencies. The single source of truth every frontend calls into.
-renderly-cli/       thin CLI over the command API — scriptable, the simplest agent-drivable surface.
-renderly-mcp/       MCP server exposing the same commands + perception tools to AI agents;
-                    proxies to the running desktop app's live bridge when one is open.
-renderly-wasm/      renderly-core's compositor compiled to wasm32 + WebGPU — the desktop
-                    app's preview renderer (same WGSL as export, zero readback).
-renderly-app/       Tauri 2 desktop app; React UI + wasm compositor preview in the webview.
+renderly-core/     Headless Rust engine — project model, command API, media I/O, compositing.
+                   No UI dependencies. The single source of truth every frontend calls into.
+renderly-cli/      Thin CLI over the command API — scriptable, the simplest agent surface.
+renderly-mcp/      MCP server: full command API + perception tools. Proxies to the running
+                   desktop app's live bridge when one is open; headless file mode otherwise.
+renderly-wasm/     renderly-core's compositor compiled to wasm32 + WebGPU — the preview.
+renderly-app/      Tauri 2 desktop app; React UI around the wasm compositor preview.
 ```
 
-One command API, one project schema, dispatched identically by the GUI, the CLI, and the
-MCP server — see [docs/architecture.md](docs/architecture.md) for the full picture and
-[docs/command-api.md](docs/command-api.md) / [docs/project-schema.md](docs/project-schema.md)
-for the exact specs the code implements. The preview migration story (why the preview
-moved from a native child window into the webview) is documented in
-[docs/preview-webview.md](docs/preview-webview.md); the live agent bridge contract is
+One command API, one project schema, dispatched identically everywhere — specs in
+[docs/command-api.md](docs/command-api.md), [docs/project-schema.md](docs/project-schema.md),
+[docs/architecture.md](docs/architecture.md). The preview migration story is
+[docs/preview-webview.md](docs/preview-webview.md); the live bridge contract is
 [docs/bridge-protocol.md](docs/bridge-protocol.md).
-
-**Tech stack:** Rust engine (FFmpeg, wgpu, whisper.cpp for local captions, local/BYO-key TTS)
-+ Tauri 2 / React UI. The preview decodes via the browser's `<video>` elements and
-composites with renderly-core's own compositor compiled to WebAssembly (WebGPU, Canvas2D
-fallback) — one compositor for preview and export, never two implementations of an effect.
-Plugins are sandboxed WebAssembly; simple content ships as no-code asset packs.
-Windows first, macOS/Linux to follow. AGPL-3.0.
-
-## Roadmap
-
-- **Phase 0** — done: schema, commands, CLI export spine (FFmpeg → wgpu → H.264).
-- **Phase 1** — done: MCP server, Whisper captions, TTS voiceover, audio fades/ducking,
-  perception tools (silence, scenes, peaks, frame render, transcript).
-- **Phase 2** — done: Tauri GUI with timeline tools, preview, audio scrub, export.
-- **Phase 3** — done: effects, transitions, keyframes, WASM plugin SDK and asset pack format.
-- **Phase 4 (current)** — parity march: heuristic implementations landed (background
-  removal, motion tracking, stabilize, auto-reframe, templates, multicam); ML-model
-  upgrades on hold. In parallel: performance/UX overhaul and the live agent bridge
-  ([docs/improvement-plan.md](docs/improvement-plan.md)).
-
-Full detail in [PLAN.md](PLAN.md) §4.
 
 ## Getting started
 
+Prereqs: Rust, Node 20+, `ffmpeg`/`ffprobe` on PATH, `wasm-pack` (`cargo install wasm-pack`).
+
 ```sh
-git clone <repo-url>
-cd video-editor
+git clone https://github.com/mecharan14/renderly.git
+cd renderly
 cargo build --workspace
-cargo test --workspace
+
+# Desktop app
+cd renderly-app
+npm install
+npm run build:wasm   # once, and after Rust compositor changes
+npm run tauri dev
 ```
 
-Try the CLI:
+Projects live in `Documents/Renderly` — date-named, auto-saved, with live gallery thumbnails.
+
+### Script it from the CLI
 
 ```sh
 cargo run -p renderly-cli -- new-project demo.renderly.json --name "my-edit"
 cargo run -p renderly-cli -- apply demo.renderly.json '{"command":"AddTrack","kind":"audio","name":"A1"}'
-cargo run -p renderly-cli -- show demo.renderly.json
 cargo run -p renderly-cli -- export demo.renderly.json out.mp4 --preset tiktok
 ```
 
-Export requires `ffmpeg` and `ffprobe` on PATH (used as subprocesses; linked
-`ffmpeg-the-third` is planned once vcpkg/FFMPEG_DIR is wired for all environments).
-
-### Desktop app
-
-Requires Node.js 20+, Rust, `wasm-pack` (`cargo install wasm-pack`), and FFmpeg on PATH.
+### Connect an agent
 
 ```sh
-cd renderly-app
-npm install
-npm run build:wasm   # builds renderly-wasm into src/wasm-pkg (once, and after Rust compositor changes)
-npm run tauri dev
+cargo build -p renderly-mcp --release
 ```
 
-The webview UI dispatches all edits via `apply_command`; the preview composites in-webview
-with the WASM compositor (WebGPU). Projects live in `Documents/Renderly` with auto-save,
-date-based names, and self-refreshing gallery thumbnails.
+Register `target/release/renderly-mcp` in your agent's MCP settings (for Claude Code:
+`claude mcp add --scope user renderly -- <path-to-exe>`). Headless, the agent can create,
+edit, caption, voice, and export projects. With the desktop app open on the same project,
+the agent's first `get_editor_status` call reports `live: true` — and from then on you're
+co-editing. Full tool list and workflow: [docs/mcp-agent-guide.md](docs/mcp-agent-guide.md).
 
-### MCP (AI agents)
+Environment for the AI features: `RENDERLY_WHISPER_MODEL` (captions),
+`RENDERLY_PIPER_MODEL` (local TTS), or `OPENAI_API_KEY` (BYO cloud voiceover).
 
-```sh
-cargo run -p renderly-mcp
-```
+## Roadmap
 
-Configure it in your agent's MCP settings and it can create, edit, caption, voice, and
-export projects headlessly — or, when the desktop app is running, drive the open project
-**live**: edits appear in the GUI immediately, share the undo stack (Ctrl+Z undoes agent
-changes), and `render_frame` returns the same pixels the user sees.
-See [docs/mcp-agent-guide.md](docs/mcp-agent-guide.md) for the tool list, agent workflow,
-and environment variables (`RENDERLY_WHISPER_MODEL` for auto-captions,
-`RENDERLY_PIPER_MODEL` for local TTS, `OPENAI_API_KEY` for OpenAI voiceover).
+- **Phase 0–3 — done:** schema + command API, CLI export spine, MCP server with perception,
+  Whisper captions, TTS voiceover, Tauri GUI, effects/transitions/keyframes, WASM plugin SDK,
+  asset packs.
+- **Phase 4 — current:** community feature-parity march; heuristics landed, ML models next.
+  In parallel: performance/UX overhaul and the live-agent workflow
+  ([docs/improvement-plan.md](docs/improvement-plan.md)).
+
+Full detail and rationale: [PLAN.md](PLAN.md) §4.
 
 ## Contributing
 
-Code or no-code, there's a way in — see [CONTRIBUTING.md](CONTRIBUTING.md). If you're an AI
-agent working in this repo, read [AGENTS.md](AGENTS.md) first; it's the enforceable
-contract behind everything summarized above.
+Code or no-code, there's a way in — see [CONTRIBUTING.md](CONTRIBUTING.md). Asset packs and
+plugins are the fastest path: [`examples/packs/starter`](examples/packs/starter),
+[`examples/plugins/invert`](examples/plugins/invert), [`examples/registry`](examples/registry).
+
+If you're an AI agent working in this repo, read [AGENTS.md](AGENTS.md) first — it is the
+enforceable contract for this codebase. (Yes, this project is partly built by the workflow it
+ships.)
 
 ## License
 
