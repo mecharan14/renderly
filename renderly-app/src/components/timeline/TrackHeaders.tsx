@@ -1,10 +1,24 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
-import { Film, Music, Type, VolumeX, Lock, EyeOff, MoreHorizontal } from "lucide-react";
+import { useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
+import { Film, Music, Type, VolumeX, Lock, EyeOff, MoreHorizontal, GripVertical } from "lucide-react";
 import { useEditorStore } from "../../store/editorStore";
-import { deleteTrack, renameTrack, setTrackFlags } from "../../lib/commands";
-import { displayOrder, trackLayout, TRACK_LABEL_W } from "../../timeline/layout";
+import { deleteTrack, moveTrack, renameTrack, setTrackFlags } from "../../lib/commands";
+import {
+  displayOrder,
+  moveTrackNewIndex,
+  trackLayout,
+  zoneRowBounds,
+  TRACK_GAP,
+  TRACK_LABEL_W,
+} from "../../timeline/layout";
 import type { Track } from "../../lib/types";
 import { Tooltip } from "../ui/Tooltip";
+
+interface DragView {
+  trackId: string;
+  startRow: number;
+  overRow: number;
+  deltaY: number;
+}
 
 function TrackKindIcon({ kind }: { kind: Track["kind"] }) {
   const props = { size: 12, strokeWidth: 1.75 } as const;
@@ -23,6 +37,7 @@ export function TrackHeaders({ containerRef }: { containerRef: RefObject<HTMLEle
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [menuOpen, setMenuOpen] = useState<string | null>(null);
+  const [dragView, setDragView] = useState<DragView | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   // Enter/Escape both call `setRenaming(null)`, which unmounts the focused rename
   // `<input>` — removing a focused DOM node fires a native blur, which React re-delivers
@@ -77,6 +92,46 @@ export function TrackHeaders({ containerRef }: { containerRef: RefObject<HTMLEle
     setRenaming(null);
   }
 
+  // Pointer-drag reorder, initiated from the row's grip handle only (so mute/lock/hide/
+  // rename/menu click targets keep working normally — no drag threshold needed). Zone
+  // constraint (CapCut behavior): the drag target row is clamped to the track's own zone
+  // (`zoneRowBounds`) so a video/caption row can never be dropped among audio rows and
+  // vice versa. `moveTrackNewIndex` (timeline/layout.ts) does the display-order-inversion
+  // math to turn the drop's visual row into the core's `MoveTrack.new_index`.
+  function onGripPointerDown(e: React.PointerEvent, track: Track, row: number) {
+    e.preventDefault();
+    e.stopPropagation();
+    const proj = useEditorStore.getState().project;
+    if (!proj) return;
+    const [zoneStart, zoneEnd] = zoneRowBounds(proj, track.kind);
+    const startClientY = e.clientY;
+    const startRow = row;
+    setDragView({ trackId: track.id, startRow, overRow: row, deltaY: 0 });
+
+    const onMove = (ev: PointerEvent) => {
+      const deltaY = ev.clientY - startClientY;
+      const rowDelta = Math.round(deltaY / (trackH + TRACK_GAP));
+      const overRow = Math.min(zoneEnd, Math.max(zoneStart, startRow + rowDelta));
+      setDragView({ trackId: track.id, startRow, overRow, deltaY });
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      setDragView((current) => {
+        if (current && current.trackId === track.id && current.overRow !== current.startRow) {
+          const latestProject = useEditorStore.getState().project;
+          if (latestProject) {
+            const newIndex = moveTrackNewIndex(latestProject, track.id, current.overRow);
+            if (newIndex != null) void dispatch(moveTrack(track.id, newIndex));
+          }
+        }
+        return null;
+      });
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
   function onRenameBlur(track: Track) {
     // A genuine "user clicked elsewhere" blur, not the unmount-triggered one that follows
     // Enter/Escape — commit like leaving any other text field.
@@ -86,12 +141,28 @@ export function TrackHeaders({ containerRef }: { containerRef: RefObject<HTMLEle
 
   return (
     <div className="track-headers" style={{ width: TRACK_LABEL_W }} ref={rootRef}>
-      {order.map(({ track }, i) => (
+      {order.map(({ track }, i) => {
+        const dragging = dragView?.trackId === track.id;
+        const rowStyle: CSSProperties = { top: laneTop(i), height: trackH };
+        if (dragging) {
+          rowStyle.transform = `translateY(${dragView!.deltaY}px)`;
+          rowStyle.zIndex = 10;
+          rowStyle.opacity = 0.85;
+        }
+        return (
         <div
           key={track.id}
-          className={`track-header-row kind-${track.kind}`}
-          style={{ top: laneTop(i), height: trackH }}
+          className={`track-header-row kind-${track.kind}${dragging ? " dragging" : ""}`}
+          style={rowStyle}
         >
+          <button
+            type="button"
+            className="track-header-grip"
+            aria-label="Drag to reorder track"
+            onPointerDown={(e) => onGripPointerDown(e, track, i)}
+          >
+            <GripVertical size={12} strokeWidth={1.75} />
+          </button>
           <span className="track-header-icon">
             <TrackKindIcon kind={track.kind} />
           </span>
@@ -171,7 +242,19 @@ export function TrackHeaders({ containerRef }: { containerRef: RefObject<HTMLEle
             </div>
           </div>
         </div>
-      ))}
+        );
+      })}
+      {dragView && dragView.overRow !== dragView.startRow && (
+        <div
+          className="track-header-drop-indicator"
+          style={{
+            top:
+              dragView.overRow < dragView.startRow
+                ? laneTop(dragView.overRow) - TRACK_GAP / 2
+                : laneTop(dragView.overRow) + trackH + TRACK_GAP / 2,
+          }}
+        />
+      )}
     </div>
   );
 }

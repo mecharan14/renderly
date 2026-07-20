@@ -208,6 +208,17 @@ function applyMockCommand(project: Project, cmd: any): void {
       if (track) track.name = cmd.name;
       break;
     }
+    case "MoveTrack": {
+      // Mirrors renderly-core's move_track: remove from current index, clamp new_index to
+      // the valid range, reinsert. No-op if the clamped index equals the current one.
+      const idx = project.tracks.findIndex((t) => t.id === cmd.track_id);
+      if (idx === -1) break;
+      const clamped = Math.min(cmd.new_index, project.tracks.length - 1);
+      if (clamped === idx) break;
+      const [track] = project.tracks.splice(idx, 1);
+      project.tracks.splice(clamped, 0, track);
+      break;
+    }
     case "SetTrackFlags": {
       const track = mockFindTrack(project, cmd.track_id);
       if (!track) break;

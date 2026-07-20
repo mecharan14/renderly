@@ -108,6 +108,47 @@ export function rowForTrackIndex(project: Project, trackIndex: number): number {
   return displayOrder(project).findIndex((d) => d.trackIndex === trackIndex);
 }
 
+/// Visual row bounds `[start, end]` (inclusive) of the zone a track of `kind` reorders
+/// within — CapCut behavior: video/caption ("overlay") tracks only reorder among
+/// themselves, audio tracks only among themselves (see `displayOrder`'s doc comment for
+/// why the two groups are visually adjacent but never interleaved). Used to clamp a
+/// drag-reorder's target row so a header can never be dropped into the other zone.
+export function zoneRowBounds(project: Project, kind: Track["kind"]): [number, number] {
+  const order = displayOrder(project);
+  const overlayCount = order.filter((d) => d.track.kind !== "audio").length;
+  if (kind === "audio") {
+    return [overlayCount, Math.max(order.length - 1, overlayCount)];
+  }
+  return [0, Math.max(overlayCount - 1, 0)];
+}
+
+/// Computes the `Command::MoveTrack` `new_index` that lands `trackId` at visual row
+/// `targetRow` after the move, or `null` if `trackId` isn't found or `targetRow` is
+/// already where it sits (no-op). `new_index` is an index into the PRE-move
+/// `project.tracks` under remove-then-insert-at-that-index semantics (see `move_track` in
+/// renderly-core/src/commands/mod.rs) — rather than hand-deriving that remap, this
+/// brute-forces every candidate index and re-derives `displayOrder` for each (track
+/// counts are always small enough that this is cheap), so it can never drift from the
+/// core's actual semantics.
+export function moveTrackNewIndex(
+  project: Project,
+  trackId: string,
+  targetRow: number,
+): number | null {
+  const idx = project.tracks.findIndex((t) => t.id === trackId);
+  if (idx === -1) return null;
+  const len = project.tracks.length;
+  for (let candidate = 0; candidate < len; candidate++) {
+    if (candidate === idx) continue;
+    const copy = project.tracks.slice();
+    const [moved] = copy.splice(idx, 1);
+    copy.splice(candidate, 0, moved);
+    const hypothetical: Project = { ...project, tracks: copy };
+    if (rowForTrackIndex(hypothetical, candidate) === targetRow) return candidate;
+  }
+  return null;
+}
+
 export interface RowDropTarget {
   /** `project.tracks` index of an existing lane to drop into, or `null` to auto-create a
    *  new track (CapCut-style drop above the overlay group / below the audio group). */

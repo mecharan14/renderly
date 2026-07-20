@@ -169,6 +169,10 @@ export function deleteTrack(trackId: string) {
   return { command: "DeleteTrack", track_id: trackId };
 }
 
+export function moveTrack(trackId: string, newIndex: number) {
+  return { command: "MoveTrack", track_id: trackId, new_index: newIndex };
+}
+
 export function setClipEnabled(trackId: string, clipId: string, enabled: boolean) {
   return { command: "SetClipEnabled", track_id: trackId, clip_id: clipId, enabled };
 }

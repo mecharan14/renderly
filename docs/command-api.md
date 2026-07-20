@@ -26,6 +26,7 @@ pub enum Command {
     SetTrackFlags { track_id: Id, muted: Option<bool>, locked: Option<bool>, hidden: Option<bool> },
     RenameTrack { track_id: Id, name: String },
     DeleteTrack { track_id: Id },
+    MoveTrack { track_id: Id, new_index: usize },
     SetClipEnabled { track_id: Id, clip_id: Id, enabled: bool },
     SetClipTransform { track_id: Id, clip_id: Id, transform: ClipTransform },
     SetClipKeyframes { track_id: Id, clip_id: Id, keyframes: Vec<KeyframeTrack> },
@@ -219,6 +220,14 @@ Removes a track and all its clips.
 
 - Errors: track not found.
 
+### `MoveTrack` (drag-to-reorder)
+Reorders a track within `Project::tracks` — this array order *is* the compositing
+z-order (index 0 = bottom of the stack). Removes the track from its current position and
+reinserts it at `new_index`, which is clamped to `0..tracks.len() - 1`. A no-op if the
+clamped index equals the track's current position.
+
+- Errors: track not found.
+
 ### `SetClipEnabled` (GUI rebuild M1)
 Soft-enables/disables a media clip (`VideoClip`/`AudioClip`) without deleting it — the
 existing `enabled` field on those clip types, now settable directly instead of only via
@@ -327,6 +336,9 @@ remain follow-ups on top of the Phase 4 command surface above.
   `GenerateBackgroundMatte`, `SetClipAudioDenoise`, `ApplyTemplate`, `GenerateSticker`,
   `CreateMulticamGroup`, `SetMulticamAngle`, `TrackMotion`, `StabilizeClip`,
   `AutoReframeClip`; pack `templates`; export multicam angle filter; afftdn denoise mix.
+
+- **Phase 4 improvement push** (non-breaking): `MoveTrack` — drag-to-reorder tracks/layers;
+  reorders `Project::tracks` (the compositing z-order) in place.
 
 - **Phase 3.4** (non-breaking): `SetClipEffects` validates known builtin ids + param
   clamps; compositor executes `builtin:color_adjust` / `blur` / `lut_contrast` / `lut_warm`.

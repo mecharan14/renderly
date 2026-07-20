@@ -1958,6 +1958,52 @@ input[type="range"]:disabled {
   background: var(--clip-caption-edge);
 }
 
+/* Drag-to-reorder: grip is invisible until the row is hovered/dragged (issue: TRACK_LABEL_W
+ * is only 88px, no room for a permanent affordance without crowding the name). Pointer-down
+ * on the grip starts the drag (see TrackHeaders.tsx onGripPointerDown) so mute/lock/hide/
+ * rename/menu controls elsewhere in the row keep working with plain clicks. */
+.track-header-grip {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 10px;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text-3);
+  opacity: 0;
+  cursor: grab;
+  touch-action: none;
+}
+
+.track-header-row:hover .track-header-grip,
+.track-header-row.dragging .track-header-grip {
+  opacity: 1;
+}
+
+.track-header-grip:active {
+  cursor: grabbing;
+}
+
+.track-header-row.dragging {
+  box-shadow: var(--shadow);
+  cursor: grabbing;
+}
+
+/* CapCut-style insertion line shown between rows while dragging (TrackHeaders.tsx
+ * dragView.overRow), clamped to the dragged track's zone (layout.ts zoneRowBounds). */
+.track-header-drop-indicator {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 20;
+}
+
 .track-header-icon {
   font-size: 10px;
   color: var(--text-2);

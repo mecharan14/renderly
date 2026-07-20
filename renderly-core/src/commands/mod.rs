@@ -132,6 +132,12 @@ pub enum Command {
     DeleteTrack {
         track_id: Id,
     },
+    /// Reorder a track within `Project::tracks` (the compositing z-order, first = bottom).
+    /// `new_index` is clamped to the valid range; a no-op if the position is unchanged.
+    MoveTrack {
+        track_id: Id,
+        new_index: usize,
+    },
     /// Soft-enable/disable a media clip (video or audio) without deleting it.
     SetClipEnabled {
         track_id: Id,
@@ -483,6 +489,10 @@ pub fn apply_command(project: &mut Project, cmd: Command) -> Result<CommandOutco
         } => set_track_flags(project, track_id, muted, locked, hidden),
         Command::RenameTrack { track_id, name } => rename_track(project, track_id, name),
         Command::DeleteTrack { track_id } => delete_track(project, track_id),
+        Command::MoveTrack {
+            track_id,
+            new_index,
+        } => move_track(project, track_id, new_index),
         Command::SetClipEnabled {
             track_id,
             clip_id,
@@ -1275,6 +1285,25 @@ fn delete_track(project: &mut Project, track_id: Id) -> Result<CommandOutcome, C
         .position(|t| t.id == track_id)
         .ok_or(CommandError::TrackNotFound(track_id))?;
     project.tracks.remove(idx);
+    Ok(CommandOutcome::Applied)
+}
+
+fn move_track(
+    project: &mut Project,
+    track_id: Id,
+    new_index: usize,
+) -> Result<CommandOutcome, CommandError> {
+    let idx = project
+        .tracks
+        .iter()
+        .position(|t| t.id == track_id)
+        .ok_or(CommandError::TrackNotFound(track_id))?;
+    let clamped = new_index.min(project.tracks.len() - 1);
+    if clamped == idx {
+        return Ok(CommandOutcome::Applied);
+    }
+    let track = project.tracks.remove(idx);
+    project.tracks.insert(clamped, track);
     Ok(CommandOutcome::Applied)
 }
 
@@ -3409,6 +3438,109 @@ mod tests {
 
         let err = apply_command(&mut project, Command::DeleteTrack { track_id }).unwrap_err();
         assert!(matches!(err, CommandError::TrackNotFound(_)));
+    }
+
+    fn add_video_track(project: &mut Project, name: &str) -> Id {
+        match apply_command(
+            project,
+            Command::AddTrack {
+                kind: TrackKind::Video,
+                name: name.into(),
+                id: None,
+            },
+        )
+        .unwrap()
+        {
+            CommandOutcome::TrackAdded { track_id } => track_id,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn move_track_moves_up() {
+        let mut project = test_project();
+        let a = add_video_track(&mut project, "A");
+        let b = add_video_track(&mut project, "B");
+        let c = add_video_track(&mut project, "C");
+        // [A, B, C] -> move A to index 2 -> [B, C, A]
+        apply_command(
+            &mut project,
+            Command::MoveTrack {
+                track_id: a,
+                new_index: 2,
+            },
+        )
+        .unwrap();
+        let ids: Vec<Id> = project.tracks.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![b, c, a]);
+    }
+
+    #[test]
+    fn move_track_moves_down() {
+        let mut project = test_project();
+        let a = add_video_track(&mut project, "A");
+        let b = add_video_track(&mut project, "B");
+        let c = add_video_track(&mut project, "C");
+        // [A, B, C] -> move C to index 0 -> [C, A, B]
+        apply_command(
+            &mut project,
+            Command::MoveTrack {
+                track_id: c,
+                new_index: 0,
+            },
+        )
+        .unwrap();
+        let ids: Vec<Id> = project.tracks.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![c, a, b]);
+    }
+
+    #[test]
+    fn move_track_clamps_out_of_range_index() {
+        let mut project = test_project();
+        let a = add_video_track(&mut project, "A");
+        let b = add_video_track(&mut project, "B");
+        apply_command(
+            &mut project,
+            Command::MoveTrack {
+                track_id: a,
+                new_index: 999,
+            },
+        )
+        .unwrap();
+        let ids: Vec<Id> = project.tracks.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![b, a]);
+    }
+
+    #[test]
+    fn move_track_unknown_id_errors() {
+        let mut project = test_project();
+        add_video_track(&mut project, "A");
+        let err = apply_command(
+            &mut project,
+            Command::MoveTrack {
+                track_id: Id::new_v4(),
+                new_index: 0,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::TrackNotFound(_)));
+    }
+
+    #[test]
+    fn move_track_same_position_is_noop() {
+        let mut project = test_project();
+        let a = add_video_track(&mut project, "A");
+        let b = add_video_track(&mut project, "B");
+        apply_command(
+            &mut project,
+            Command::MoveTrack {
+                track_id: a,
+                new_index: 0,
+            },
+        )
+        .unwrap();
+        let ids: Vec<Id> = project.tracks.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![a, b]);
     }
 
     #[test]
