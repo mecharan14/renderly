@@ -441,16 +441,18 @@ fn compiled_hwaccels() -> &'static [String] {
     })
 }
 
-/// First `HWACCEL_CANDIDATES` entry this ffmpeg was compiled with, else `"auto"` — ffmpeg
-/// resolves `-hwaccel auto` to whatever it can use, or silently stays on software decode,
-/// so it's always safe to *try* even when we can't tell in advance if it'll help.
-fn preferred_hwaccel() -> &'static str {
+/// First `HWACCEL_CANDIDATES` entry this ffmpeg was compiled with, if any.
+///
+/// Returns `None` (software decode) when no named candidate is present — we deliberately
+/// do **not** fall back to `-hwaccel auto`. On Linux CI and many desktop installs, `auto`
+/// can resolve to VAAPI (or similar) with a download/color path that drifts from our
+/// explicit BT.709 swscale chain, which would break preview↔software parity.
+fn preferred_hwaccel() -> Option<&'static str> {
     let compiled = compiled_hwaccels();
     HWACCEL_CANDIDATES
         .iter()
         .find(|c| compiled.iter().any(|line| line == *c))
         .copied()
-        .unwrap_or("auto")
 }
 
 /// Sequential RGBA frame reader backed by a long-lived `ffmpeg` decode pipe.
@@ -476,17 +478,18 @@ impl VideoReader {
     /// A3: hardware decode via `-hwaccel`, probed once per process and cached.
     ///
     /// The *first* `VideoReader` opened in the process's lifetime pays the cost of
-    /// actually trying hardware decode: spawn ffmpeg with the best compiled-in candidate
-    /// (or `auto`), decode one real frame as a warm-up/health check, and remember the
-    /// outcome in `HWACCEL_WORKS`. Every subsequent open in this process just replays that
-    /// cached decision instead of re-probing — hwaccel failures are systemic (missing
-    /// driver/codec support), not per-file, so re-attempting per open would only add
-    /// latency to every single decoder spawn (every seek, scrub, and clip change) for no
-    /// benefit.
+    /// actually trying hardware decode: spawn ffmpeg with the best compiled-in *named*
+    /// candidate (`cuda` / `qsv` / `d3d11va`), decode one real frame as a warm-up/health
+    /// check, and remember the outcome in `HWACCEL_WORKS`. Every subsequent open in this
+    /// process just replays that cached decision instead of re-probing — hwaccel failures
+    /// are systemic (missing driver/codec support), not per-file, so re-attempting per
+    /// open would only add latency to every single decoder spawn (every seek, scrub, and
+    /// clip change) for no benefit.
     ///
-    /// If the cached/attempted hwaccel run fails to produce a first frame, this falls
-    /// back to a fresh software-only spawn transparently — callers never see the
-    /// difference beyond decode running on the CPU instead of the GPU.
+    /// If no named candidate is compiled in, or the cached/attempted hwaccel run fails to
+    /// produce a first frame, this falls back to a fresh software-only spawn transparently
+    /// — callers never see the difference beyond decode running on the CPU instead of the
+    /// GPU. We never pass `-hwaccel auto` (see [`preferred_hwaccel`]).
     pub fn open_with(
         path: &Path,
         start_secs: f64,
@@ -495,14 +498,21 @@ impl VideoReader {
         match HWACCEL_WORKS.get().copied() {
             // Already confirmed working earlier this process — use it directly, no
             // per-open warm-up/verification cost.
-            Some(true) => return Self::spawn(path, start_secs, opts, Some(preferred_hwaccel())),
+            Some(true) => {
+                return Self::spawn(path, start_secs, opts, preferred_hwaccel());
+            }
             // Already confirmed broken earlier this process — don't pay to re-try it.
             Some(false) => return Self::spawn(path, start_secs, opts, None),
             // First open this process: probe it once, verified by an actual decode.
             None => {}
         }
 
-        let accel = preferred_hwaccel();
+        let Some(accel) = preferred_hwaccel() else {
+            // No named backend compiled in — stay on software; do not try `-hwaccel auto`.
+            let _ = HWACCEL_WORKS.set(false);
+            return Self::spawn(path, start_secs, opts, None);
+        };
+
         match Self::spawn(path, start_secs, opts, Some(accel)) {
             Ok(mut reader) => match reader.read_frame_from_pipe() {
                 Ok(Some(frame)) => {
@@ -1448,7 +1458,11 @@ mod video_reader_tests {
             .expect("software read")
             .expect("software frame");
 
-        let accel = super::preferred_hwaccel();
+        let Some(accel) = super::preferred_hwaccel() else {
+            eprintln!("skipping: no named hwaccel (cuda/qsv/d3d11va) compiled into this ffmpeg");
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        };
         let hw_frame = match VideoReader::spawn(&video_path, 0.0, &opts, Some(accel)) {
             Ok(mut hw) => match hw.read_frame_from_pipe() {
                 Ok(Some(frame)) => frame,
