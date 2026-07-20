@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo-with-text-1200.png" alt="Renderly" width="600">
+</p>
+
 # Renderly
 
 **An open-source, native video editor built for AI agents — and the humans who finish the job.**

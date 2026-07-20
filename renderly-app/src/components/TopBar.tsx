@@ -16,20 +16,10 @@ import { IconButton } from "./ui/IconButton";
 import { WindowControls } from "./ui/WindowControls";
 import * as ipc from "../lib/ipc";
 import { getThemePreference } from "../lib/theme";
+import logoSmall from "../assets/logo-64.png";
 
 function BrandMark() {
-  return (
-    <svg className="brand-mark-svg" width="16" height="16" viewBox="0 0 16 16" aria-hidden>
-      <path
-        d="M3 3.5 L8 8 L3 12.5 M8 8 L13 3.5 M8 8 L13 12.5"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.75"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
+  return <img className="brand-mark-img" src={logoSmall} width={18} height={18} alt="" aria-hidden />;
 }
 
 function actionTooltip(id: string, fallback: string): string {

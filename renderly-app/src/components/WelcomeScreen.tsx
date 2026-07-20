@@ -9,6 +9,7 @@ import { useEditorStore } from "../store/editorStore";
 import { IconButton } from "./ui/IconButton";
 import { WindowControls } from "./ui/WindowControls";
 import * as ipc from "../lib/ipc";
+import logoLarge from "../assets/logo-256.png";
 
 function formatModified(ms: number): string {
   if (!ms) return "";
@@ -97,16 +98,7 @@ export function WelcomeScreen() {
       <div className="welcome-home">
         <div className="welcome-home-header">
           <div className="welcome-brand" aria-hidden>
-            <svg width="28" height="28" viewBox="0 0 16 16">
-              <path
-                d="M3 3.5 L8 8 L3 12.5 M8 8 L13 3.5 M8 8 L13 12.5"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
+            <img src={logoLarge} width={40} height={40} alt="" />
           </div>
           <div>
             <h1>Renderly</h1>
