@@ -82,8 +82,11 @@ fn pid_alive(pid: u32) -> bool {
             true
         } else {
             // ESRCH → gone. EPERM → exists but not signalable → still alive.
-            // Any other errno: treat as alive and let TCP decide.
-            std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound
+            // Any other errno: treat as alive and let TCP decide. Compare the raw errno:
+            // Rust maps ESRCH to ErrorKind::Uncategorized (NotFound is ENOENT), so a
+            // kind()-based check would misreport dead processes as alive.
+            const ESRCH: i32 = 3; // same value on Linux, macOS, and the BSDs
+            std::io::Error::last_os_error().raw_os_error() != Some(ESRCH)
         }
     }
     #[cfg(not(any(windows, unix)))]
