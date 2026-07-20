@@ -194,7 +194,10 @@ impl TexturePool {
 /// Upload RGBA pixels into an existing texture, padding rows to wgpu's 256-byte
 /// `bytes_per_row` alignment when the tight row stride doesn't already satisfy it
 /// (mirrors the pooled-texture upload path in `renderly-app/src-tauri/src/preview/gfx.rs`).
-fn upload_layer_pixels(
+/// `pub` (not just crate-internal) so `renderly-wasm` can reuse the same padding-safe upload
+/// when it builds its own cached caption texture (docs/preview-webview.md P3) instead of
+/// duplicating the alignment math.
+pub fn upload_layer_pixels(
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
     width: u32,

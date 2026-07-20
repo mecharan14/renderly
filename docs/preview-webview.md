@@ -178,12 +178,17 @@ media file ──► <video> / WebCodecs VideoDecoder (HW decode, browser-schedu
 
   **What was built (stages 1–2, commit b910c52):**
   - `renderly-core` compiles on `wasm32-unknown-unknown` via `#[cfg(target_arch)]` gating
-    (not a Cargo feature — simpler and can't be left off): `audio`, `captions`,
+    (not a Cargo feature — simpler and can't be left off): `audio`,
     `commands`, `export`, `media`, `perceive`, `plugins`, `segmentation` are native-only;
     `project` (+`anim`), `compose` (all WGSL effects/transitions/chroma/masks), `mask`,
     `packs`' pure LUT helpers, and the new `frame` module (`RgbaFrame`, moved out of
     `media`) build on both targets. Native-only deps live under
-    `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`.
+    `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`. `captions` (P3, below) is
+    now cross-target too: its `ab_glyph` rasterizer has no fs/GPU dependency of its own —
+    only font *acquisition* is target-gated (native reads `RENDERLY_FONT_PATH`/system
+    fonts; wasm32 embeds a bundled font via `include_bytes!`), and `render_caption_for_project`
+    (pack-style lookup, needs `packs::load_project_packs`' fs access) stays native-only
+    while the pure `render_caption` (builtin styles) is available on both targets.
   - The parity-critical evaluation ("which layers are active at time T, with what source
     times, keyframed params, transition progress") was extracted verbatim from
     `export/mod.rs` into decode-free `renderly-core/src/compose/eval.rs`
@@ -232,7 +237,10 @@ media file ──► <video> / WebCodecs VideoDecoder (HW decode, browser-schedu
     `wasm-pack build ../renderly-wasm --target web --release --out-dir
     ../renderly-app/src/wasm-pkg --no-pack`. The generated pkg is **gitignored**
     (wasm-pack emits its own `*` .gitignore) — run `build:wasm` once after checkout to get
-    the GPU preview path. **Binary size: 468 KB wasm (release + wasm-opt) + 61 KB JS glue.**
+    the GPU preview path. **Binary size: 468 KB wasm (release + wasm-opt) + 61 KB JS glue**
+    pre-P3; **1.16 MB wasm post-P3** — the jump is `renderly-wasm/assets/Roboto-Bold.ttf`
+    (503 KB, Apache-2.0), the bundled caption font embedded via `include_bytes!` (see the
+    captions entry below).
   - Shader fix that P2 flushed out: `transition.wgsl`'s `sample_or_black` called
     `textureSample` under varying-dependent control flow — native naga is lenient, but the
     browser's WGSL compiler enforces the uniformity analysis strictly and rejected the
@@ -320,6 +328,64 @@ media file ──► <video> / WebCodecs VideoDecoder (HW decode, browser-schedu
   transition test added this pass; (c) the exact-multiplier opacity/keyframe pixel checks
   above.
 
+  **Captions burn-in (P3, landed 2026-07-20).** Chose CPU rasterization into the same
+  `ComposeLayer` pipeline (not a DOM overlay) because export's caption path
+  (`renderly-core/src/captions/mod.rs`) turned out to be pure Rust — `ab_glyph` glyph
+  outlining with no fs/GPU coupling in the rasterizer itself, only in font *acquisition* —
+  so it compiles on wasm32 unchanged once font loading is target-gated. This keeps the
+  one-compositor rule intact (AGENTS.md §0.5): captions still go through the exact same
+  `ComposeLayer`/WGSL composite pass as export, just fed a CPU-rasterized bitmap instead of
+  a decoded video frame — export already does exactly this (`export/mod.rs`'s
+  `render_inner` pushes one `ComposeLayer` per `eval::active_captions` entry with
+  `LayerSource::Frame(render_caption_for_project(...))`).
+  - `renderly-wasm/src/compositor.rs`'s `render()` calls the same shared
+    `eval::active_captions(project, t)` export uses for timing (never re-derives caption
+    visibility in JS), rasterizes each active caption via
+    `renderly_core::captions::render_caption` (builtin styles only — see below), and
+    uploads the RGBA bitmap into a `Rgba8Unorm` texture cached in a new
+    `caption_textures: HashMap<(text, style_id), MediaTexture>` field. A cache entry is
+    reused as-is (`ComposeLayer::Texture`, zero re-rasterize/re-upload) every frame the
+    same text+style is active at the same output resolution; it's rebuilt only when the
+    text, style_id, or project resolution changes. Pushed onto `compose_layers` as the
+    topmost layer(s), identity `ClipTransform` (caption bitmaps are already rendered at
+    output resolution, same as export — `compose::cover_uv` is then a no-op).
+  - Font: wasm32 has no filesystem, so `captions::load_font()` embeds
+    `renderly-wasm/assets/Roboto-Bold.ttf` (Apache-2.0, `LICENSE-Roboto.txt` alongside it)
+    via `include_bytes!` on that target only; native `load_font()` is unchanged
+    (`RENDERLY_FONT_PATH` → per-OS system font candidates). **Known parity gap:** an
+    export using `RENDERLY_FONT_PATH` (or whichever system font it resolves to — Arial on
+    Windows, DejaVu Sans Bold on Linux) previews with Roboto Bold instead; glyph metrics
+    differ slightly, so caption line-wrap width can shift a few px between preview and
+    export. Documented in the `captions` module doc comment too.
+  - **Known scope gap:** `render_caption_for_project` (resolves `style_id` against
+    asset-pack-authored caption styles, needs `packs::load_project_packs`'s fs access) is
+    native-only. The wasm path calls the pure `render_caption` (builtin styles:
+    `tiktok-bold-yellow`/`tiktok-minimal`/`tiktok-box`/`youtube-lower-thirds`) — a
+    pack-authored custom caption style previews as the `_` fallback (tiktok-bold-yellow
+    spec) until pack loading lands in wasm, tracked alongside the other pack-LUT preview
+    gap above.
+  - Canvas2D fallback path (`localStorage["renderly.previewEngine"]` unset and WebGPU
+    unavailable) does **not** render captions — it's the pre-P2 JS-only compositor and
+    never grew a text path; captions there remain export-only until/unless that fallback
+    is retired (P4 deletes the native preview, not the Canvas2D one, so this is a real gap,
+    just a narrow one: WebGPU is available in essentially all evergreen desktop browsers).
+  - Verified in the harness (`vite.harness.config.ts`, port 5188, `window.__store` +
+    `window.__previewEngine`): (a) sampling the preview canvas at a time with an active
+    caption vs. the same time with the caption track's `hidden` flag toggled via
+    `SetTrackFlags` showed 286/90225 differing pixels (text ink) at the harness's small
+    (225×401) canvas backing size; (b) the same shown/hidden diff at a gap between two
+    captions (t=10, between the 6–9 s and 11–13.2 s clips) was exactly 0 differing pixels;
+    (c) dispatching `SetCaption` to change a caption's text while paused on it changed the
+    canvas (712 differing pixels) with no reload, confirming the store-patch → redraw path
+    picks up caption edits like it does transform edits. Perf: `__previewStats.drawMs`
+    steady-state with the caption visible (cache warm) averaged 0.40 ms over 30 redraws vs.
+    0.32 ms with the caption track hidden (no caption compositing at all) — same order of
+    magnitude, confirming the texture cache keeps per-frame cost near the no-caption
+    baseline. A forced cache-miss redraw (right after a `SetCaption` text change, so the
+    `(text, style_id)` cache key changed) cost 0.60 ms vs. 0.30–0.40 ms for the following
+    cache-hit redraws of the same text — the miss is real but small at this scale, and
+    disappears immediately on the next frame.
+
   **Deferred on the wasm path (explicitly, per the P2 scope allowances):**
   - Pack (`.cube`) LUTs — need filesystem loads; `render` passes an empty pack slice and
     pack-LUT effect instances are skipped. (Wire-up path: JS fetches pack bytes and hands
@@ -327,7 +393,7 @@ media file ──► <video> / WebCodecs VideoDecoder (HW decode, browser-schedu
   - Raster / `Generated` mattes (`image::open`) — masks of those kinds are dropped before
     composite (`Luma` in-memory mattes DO work). Background removal likewise (needs CPU
     frame access).
-  - Captions burn-in (P3 per the phase plan), audio (stays on the backend/rodio path).
+  - Audio (stays on the backend/rodio path).
   - Images in the harness: the sample logo isn't mapped to a real file by the mock, so the
     `HTMLImageElement` code path in `render` is written but not pixel-verified.
   - ~~Same-media transitions~~ — FIXED (2026-07-18): both sides of a transition between two
@@ -346,9 +412,9 @@ media file ──► <video> / WebCodecs VideoDecoder (HW decode, browser-schedu
     gitignored pkg absent — verified both with and without the pkg on disk). Dev mode
     (Tauri dev server, harness) gets the GPU path; release builds fall back to Canvas2D
     until P3 makes the wasm path the shipped default and bundles the pkg properly.
-- **P3 — Audio + full switchover.** WebAudio mixing (or keep backend audio if simpler),
-  captions burn-in via the same WGSL text path, remove `set_preview_bounds`/child-window
-  sync from the hot path, default the flag on.
+- **P3 — Audio + full switchover.** Captions burn-in landed (above, 2026-07-20). Remaining:
+  WebAudio mixing (or keep backend audio if simpler), remove
+  `set_preview_bounds`/child-window sync from the hot path, default the flag on.
 - **P4 — Deletion.** Remove `preview/{win32,macos,linux,stub}.rs`, `present_rgba`, and the
   bounds-sync effect; simplify `playback.rs` to export/scrub-server duties.
 

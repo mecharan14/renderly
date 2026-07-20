@@ -9,7 +9,10 @@
 // compositor (renderly-wasm) links against them directly for preview-parity with export.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod audio;
-#[cfg(not(target_arch = "wasm32"))]
+// Pure CPU rasterization (ab_glyph) — no fs/decode deps beyond font loading, which is
+// target-gated internally (fs candidates natively, an embedded bundled font on wasm32). Both
+// the native export path and the wasm preview compositor link this for caption-burn-in parity
+// (docs/preview-webview.md P3).
 pub mod captions;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod commands;

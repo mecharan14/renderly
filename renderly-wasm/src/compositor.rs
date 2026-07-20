@@ -15,8 +15,16 @@
 //! Deferred on this path (documented in docs/preview-webview.md P2): pack (`.cube`) LUTs
 //! (they need filesystem loads; `packs` is empty here so pack-LUT effect instances are
 //! skipped by the effect processor), raster/`Generated` mattes (`image::open` — masks of
-//! those kinds are dropped before composite), captions burn-in (P3), and background
-//! removal (needs CPU frame access).
+//! those kinds are dropped before composite), and background removal (needs CPU frame
+//! access).
+//!
+//! Captions (P3, landed): `eval::active_captions(project, t)` — the same shared timing eval
+//! export uses — drives which caption clips are live; `renderly_core::captions::render_caption`
+//! (builtin styles only; pack-authored caption styles are a documented preview gap, see that
+//! module's doc comment) rasterizes each one to an RGBA bitmap with a bundled font (no
+//! filesystem on wasm32). The bitmap is uploaded once into a cached `Rgba8Unorm` texture keyed
+//! on `(text, style_id)` and reused as a topmost `ComposeLayer::Texture` every frame after —
+//! re-rasterized only when the text/style/output-resolution changes, not per frame.
 //!
 //! Same-media transitions (e.g. a split clip with a crossfade at the cut, where both sides
 //! of the transition share one media item): `resolve_layer_source` below resolves the
@@ -28,8 +36,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use renderly_core::compose::{eval, ComposeLayer, Compositor, LayerSource};
-use renderly_core::project::{ClipMaskKind, Project};
+use renderly_core::compose::{eval, upload_layer_pixels, ComposeLayer, Compositor, LayerSource};
+use renderly_core::project::{ClipMaskKind, ClipTransform, Project};
 use wasm_bindgen::prelude::*;
 use web_sys::{HtmlCanvasElement, HtmlImageElement, HtmlVideoElement};
 
@@ -117,6 +125,10 @@ pub struct WasmCompositor {
     /// media-id → pooled GPU texture receiving `copy_external_image_to_texture` copies.
     /// Recreated only when the source's pixel size changes.
     media_textures: HashMap<String, MediaTexture>,
+    /// (caption text, style_id) → cached rasterized-caption GPU texture. Rebuilt only when
+    /// the text/style is new or the output resolution changed (tracked via the cached
+    /// entry's own width/height) — NOT every frame. See the module doc's captions section.
+    caption_textures: HashMap<(String, String), MediaTexture>,
     blit_pipeline: wgpu::RenderPipeline,
     blit_layout: wgpu::BindGroupLayout,
     blit_sampler: wgpu::Sampler,
@@ -249,6 +261,7 @@ impl WasmCompositor {
             compositor: None,
             project: None,
             media_textures: HashMap::new(),
+            caption_textures: HashMap::new(),
             blit_pipeline,
             blit_layout,
             blit_sampler,
@@ -293,6 +306,11 @@ impl WasmCompositor {
 
         let layers =
             eval::active_layers(project, time_secs).map_err(|e| js_err("active_layers", e))?;
+        // Copied out (not borrowed) before the loop below takes `&mut self`: `project` is a
+        // borrow of `self.project` and can't stay alive across the mutable
+        // `ensure_media_texture`/`ensure_caption_texture` calls that follow.
+        let (out_w, out_h) = (project.settings.width, project.settings.height);
+        let captions = eval::active_captions(project, time_secs);
 
         let mut compose_layers: Vec<ComposeLayer> = Vec::with_capacity(layers.len());
         for layer in &layers {
@@ -378,6 +396,25 @@ impl WasmCompositor {
                 effects: layer.effects.clone(),
                 mask,
                 transition: layer.transition,
+            });
+        }
+
+        for cap in &captions {
+            let texture = self.ensure_caption_texture(&cap.text, &cap.style_id, out_w, out_h)?;
+            compose_layers.push(ComposeLayer {
+                source: LayerSource::Texture {
+                    texture,
+                    width: out_w,
+                    height: out_h,
+                },
+                // Caption bitmaps are already rendered at output resolution (same as export,
+                // see `export::mod.rs`'s FrameRenderer::render_inner) — identity transform, no
+                // cover-fit needed (`compose::cover_uv` is a no-op when layer/output aspect
+                // already match).
+                transform: ClipTransform::default(),
+                effects: Vec::new(),
+                mask: None,
+                transition: None,
             });
         }
 
@@ -535,5 +572,51 @@ impl WasmCompositor {
             );
         }
         self.media_textures[key].texture.clone()
+    }
+
+    /// Rasterize (if not already cached at this text/style/resolution) and return the GPU
+    /// texture for one active caption. Cache key is `(text, style_id)`; a resolution change
+    /// (project settings edited) invalidates via the width/height stored on the cached entry,
+    /// same pattern as `ensure_media_texture`'s size-staleness check.
+    fn ensure_caption_texture(
+        &mut self,
+        text: &str,
+        style_id: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, JsValue> {
+        let key = (text.to_string(), style_id.to_string());
+        let stale = self
+            .caption_textures
+            .get(&key)
+            .is_none_or(|t| t.width != width || t.height != height);
+        if stale {
+            let frame = renderly_core::captions::render_caption(text, style_id, width, height)
+                .map_err(|e| js_err("render_caption", e))?;
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("preview-caption"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            upload_layer_pixels(&self.queue, &texture, width, height, &frame.pixels);
+            self.caption_textures.insert(
+                key.clone(),
+                MediaTexture {
+                    texture,
+                    width,
+                    height,
+                },
+            );
+        }
+        Ok(self.caption_textures[&key].texture.clone())
     }
 }

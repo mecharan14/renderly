@@ -1,8 +1,19 @@
-//! Built-in caption style presets and CPU text rasterization for export (Phase 1).
-//! GPU text via cosmic-text/glyphon lands in Phase 2 preview; export burns captions here.
+//! Built-in caption style presets and CPU text rasterization, shared by native export
+//! (burn-in) and the wasm preview compositor (docs/preview-webview.md P3). `ab_glyph` is
+//! pure Rust with no fs/GPU dependency in its rasterization path, so the same glyph-outline
+//! code runs on both targets — only font *acquisition* differs (`load_font` below): native
+//! reads `RENDERLY_FONT_PATH` / system font files, wasm32 has no filesystem and embeds a
+//! bundled font instead (see `renderly-wasm`'s `assets/Roboto-Bold.ttf`, Apache-2.0).
+//!
+//! `render_caption_for_project` (pack-style lookup, needs `fs`-backed pack loading) is
+//! native-only; the wasm compositor calls the pure [`render_caption`] with builtin styles
+//! only — a pack-authored custom caption style previews as the nearest builtin approximation
+//! until pack loading lands in wasm (tracked alongside the other pack-LUT preview gaps in
+//! `renderly-wasm/src/compositor.rs`'s module doc).
 
-use crate::media::RgbaFrame;
+use crate::frame::RgbaFrame;
 use ab_glyph::{point, Font, FontArc, Glyph, PxScale, ScaleFont};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use thiserror::Error;
 
@@ -74,6 +85,21 @@ fn style_spec(style_id: &str) -> StyleSpec {
     }
 }
 
+/// wasm32 has no filesystem: embed a bundled font so the preview always has *something* to
+/// rasterize with. `RENDERLY_FONT_PATH`/system-font resolution (native only) may pick a
+/// different face for export than this preview font — documented in
+/// docs/preview-webview.md P3 as a known, acceptable parity gap (glyph metrics differ
+/// slightly from Arial/DejaVu, so caption line-wrap width can shift a few px between
+/// preview and export).
+#[cfg(target_arch = "wasm32")]
+static BUNDLED_FONT: &[u8] = include_bytes!("../../../renderly-wasm/assets/Roboto-Bold.ttf");
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn load_font() -> Result<FontArc, CaptionError> {
+    FontArc::try_from_slice(BUNDLED_FONT).map_err(|e| CaptionError::FontLoad(e.to_string()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn load_font() -> Result<FontArc, CaptionError> {
     if let Ok(path) = std::env::var("RENDERLY_FONT_PATH") {
         let data = std::fs::read(&path).map_err(|e| CaptionError::FontLoad(e.to_string()))?;
@@ -93,6 +119,7 @@ pub(crate) fn load_font() -> Result<FontArc, CaptionError> {
     Err(CaptionError::NoFont)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn font_candidates() -> Vec<std::path::PathBuf> {
     let mut paths = Vec::new();
     #[cfg(windows)]
@@ -111,6 +138,7 @@ fn font_candidates() -> Vec<std::path::PathBuf> {
     paths
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn style_from_pack(style: &crate::packs::PackCaptionStyle) -> StyleSpec {
     let anchor = match style.anchor.as_str() {
         "top" => 0.18,
@@ -130,6 +158,9 @@ fn style_from_pack(style: &crate::packs::PackCaptionStyle) -> StyleSpec {
 }
 
 /// Rasterize a caption, resolving `style_id` against builtins then loaded asset packs.
+/// Native-only: pack loading needs filesystem access (see `packs::load_project_packs`).
+/// The wasm preview compositor calls [`render_caption`] directly (builtin styles only).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn render_caption_for_project(
     project: &crate::project::Project,
     text: &str,
