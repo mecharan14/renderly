@@ -361,16 +361,21 @@ export class WebviewPreviewEngine {
         );
       }
       if (adapter) {
-        // Runtime-resolved path, deliberately invisible to Vite's static analysis
-        // (@vite-ignore + no import.meta.url — Vite constant-folds concats and globs
-        // dynamic `new URL` templates, either of which would make the BUILD depend on the
-        // gitignored generated pkg). The pkg lives in public/wasm-pkg (P3): Vite serves
-        // public/ at the site root in dev (real-app dev + browser harness) and copies it
-        // verbatim into dist/ for production, so this one specifier resolves in every
-        // mode. tauri.conf.json's beforeBuildCommand runs build:wasm first, so a release
-        // bundle can never ship without the pkg; if it's somehow absent the import throws
-        // → Canvas2D fallback (see docs/preview-webview.md P3).
-        const spec = "/wasm-pkg/renderly_wasm.js";
+        // The pkg lives in public/wasm-pkg (P3): Vite serves public/ at the site root in
+        // dev (real-app dev + browser harness) and copies it verbatim into dist/ for
+        // production, so one URL resolves in every mode, and
+        // tauri.conf.json's beforeBuildCommand runs build:wasm first so a release can
+        // never ship without it. If it's somehow absent the import throws → Canvas2D
+        // fallback (see docs/preview-webview.md P3).
+        //
+        // The specifier MUST be built from `location.origin` at runtime rather than
+        // written as a literal: Vite resolves even `@vite-ignore`'d dynamic imports whose
+        // specifier it can constant-fold, and files under public/ deliberately bypass the
+        // transform pipeline — so a literal "/wasm-pkg/..." fails dev with "This file is
+        // in /public and ... should not be imported from source code." An absolute URL
+        // assembled at runtime is opaque to that analysis and is fetched straight from the
+        // server/bundle by the browser.
+        const spec = `${location.origin}/wasm-pkg/renderly_wasm.js`;
         const mod = (await import(/* @vite-ignore */ spec)) as {
           default: () => Promise<unknown>;
           WasmCompositor: { create(canvas: HTMLCanvasElement): Promise<WasmCompositorLike> };
