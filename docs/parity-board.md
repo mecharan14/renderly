@@ -1,29 +1,100 @@
-# Feature parity board (Phase 4)
+# Feature parity board
 
-Public checklist so contributors can pick independently testable slices. Each card
-links schema/commands/fixtures. Check items when they ship with docs + core tests +
-GUI/CLI/MCP reachability.
+What Renderly does today, what's open for contribution, and what's deferred on purpose.
+This is the board PLAN.md §4 calls for — pick work from here.
 
-| ID | Feature | Status | Spec / entry points |
-|----|---------|--------|---------------------|
-| P4-0 | Phase 3 baseline landed; architecture status current | done | [architecture.md](architecture.md) |
-| P4-1a | Shared `ClipMask` + compositor alpha path | done | schema v6; `SetClipMask`; `renderly-core/src/mask.rs` |
-| P4-1b | Local background removal (heuristic + optional `RENDERLY_SEG_CLI`) | done | `SetClipBackgroundRemoval`, `GenerateBackgroundMatte`; `segmentation/` |
-| P4-2 | Audio denoise (`afftdn`) on audio-track clips | done | `SetClipAudioDenoise`; audio-track-only v1 |
-| P4-3 | Chroma key builtin | done | `builtin:chroma_key`; Effects panel |
-| P4-3b | Shape mask authoring (rect/ellipse UI polish) | done | Mask tool (M); `PreviewMaskOverlay`; inspector enable/invert/feather/shape; `preview_mask_override` |
-| P4-4 | Motion tracking → keyframes | done | `TrackMotion` |
-| P4-4b | Auto-reframe | done | `AutoReframeClip` |
-| P4-5 | Stabilization | done | `StabilizeClip` (centroid-smoothed keyframes) |
-| P4-6 | Templates | done | pack `templates[]` + `ApplyTemplate` |
-| P4-6b | Text-to-sticker | done | `GenerateSticker` (local generated PNG; not an external image model) |
-| P4-7 | Multi-cam groups + angle switch | done | `CreateMulticamGroup`, `SetMulticamAngle`; export skips inactive angles |
-| P4-ML | Core-hosted ONNX RVM/BiRefNet | open | Design gate: CLI/heuristic first; ONNX needs license review |
-| P4-Wayland | Linux Wayland native preview | done | `wl_subsurface` + empty input region; runtime X11/Wayland dispatch; no Linux CI runner yet |
+**Legend:** ✅ shipped · 🟡 works, wants a better implementation · ⬜ open · ⏸️ deferred
 
-## Inference runtime decision (recorded)
+Open an issue saying what you're picking up before starting large work, and read
+[CONTRIBUTING.md](../CONTRIBUTING.md) plus [AGENTS.md](../AGENTS.md) §0 first. The
+highest-leverage contributions are the 🟡 rows: the command, the GUI surface, and the tests
+already exist, so the work is swapping the algorithm underneath a stable API.
 
-Current WASM frame plugins instantiate per call and copy full RGBA — unsuitable for
-RVM/BiRefNet. Phase 4.1 uses **heuristic mattes** plus optional **`RENDERLY_SEG_CLI`**
-(Whisper-style). Linking `ort` / ONNX remains a follow-up after AGPL-compatible license
-review — never as a user-loadable native DLL plugin.
+## Editing core
+
+| Feature | State | Entry points |
+|---|---|---|
+| Multi-track timeline (video/audio/caption) | ✅ | Array order = compositing z-order |
+| Trim / split / move / ripple, snapping, groups, razor | ✅ | `timeline/interactions.ts`, command API |
+| Track reordering | ✅ | `MoveTrack`; drag the track header grip |
+| Keyframe animation + easing curves | ✅ | `project/anim.rs`; transform, opacity, volume |
+| Speed ramp with pitch-corrected audio | ✅ | `SetClipSpeed` |
+| Undo/redo | ✅ | Shared with agent edits over the bridge |
+| Nested sequences / compound clips | ⬜ | Schema change — discuss in an issue first |
+| Adjustment layers | ⬜ | Effects applied to everything below a track |
+
+## Rendering & effects
+
+| ID | Feature | State | Entry points / notes |
+|---|---|---|---|
+| — | WGSL effect system (color, blur, glitch, LUT…) | ✅ | Same code in preview and export |
+| — | Transitions (10 built-in) | ✅ | `SetClipTransition` |
+| P4-1a | Shape masks (rect/ellipse) + compositor alpha path | ✅ | schema v6; `SetClipMask`; `renderly-core/src/mask.rs` |
+| P4-3b | Shape mask authoring UI | ✅ | Mask tool (M); `PreviewMaskOverlay`; inspector feather/invert |
+| — | Raster / generated mattes in preview | 🟡 | Export only — needs fs-free decode on wasm32 |
+| — | Pack `.cube` LUTs in preview | 🟡 | Export only — needs the LUT packed without a filesystem load |
+| P4-3 | Chroma key | 🟡 | `builtin:chroma_key`; CPU per-pixel, wants a WGSL pass |
+| P4-1b | Background removal | 🟡 | `SetClipBackgroundRemoval`, `GenerateBackgroundMatte`; heuristic + optional `RENDERLY_SEG_CLI` |
+| P4-ML | Core-hosted ONNX RVM/BiRefNet | ⬜ | **The headline open item.** See the recorded decision below |
+| — | Captions burned in | ✅ | Preview and export share the `ab_glyph` rasterizer |
+| — | Captions in the Canvas2D fallback | ⏸️ | WebGPU covers evergreen browsers; low value |
+| — | Hardware decode (`-hwaccel`) / encode (NVENC/QSV) | ✅ | Probed, software fallback |
+| — | Linked FFmpeg (`ffmpeg-the-third`) | ⏸️ | Waiting on vcpkg/`FFMPEG_DIR` across all environments |
+
+## AI & automation
+
+| ID | Feature | State | Entry points / notes |
+|---|---|---|---|
+| — | MCP server (full command API) | ✅ | `renderly-mcp` |
+| — | Perception: scenes, silence, peaks, transcript, frame render | ✅ | |
+| — | Live bridge to the running app (shared undo) | ✅ | [bridge-protocol.md](bridge-protocol.md) |
+| — | Whisper auto-captions | ✅ | Local; `RENDERLY_WHISPER_MODEL` |
+| — | TTS voiceover (local Piper / BYO cloud key) | ✅ | `GenerateVoiceover` |
+| — | Ducking, fades, mixing | ✅ | |
+| P4-2 | Audio denoise | 🟡 | `SetClipAudioDenoise` (`afftdn`); wants an RNNoise-class model |
+| P4-4 | Motion tracking | 🟡 | `TrackMotion`; centroid heuristic, wants feature tracking |
+| P4-5 | Stabilization | 🟡 | `StabilizeClip`; centroid-smoothed keyframes |
+| P4-4b | Auto-reframe | 🟡 | `AutoReframeClip`; wants subject detection |
+| P4-6b | Text-to-sticker | 🟡 | `GenerateSticker`; locally generated PNG, not an image model |
+| P4-6 | Templates | ✅ | Pack `templates[]` + `ApplyTemplate` |
+| P4-7 | Multicam groups + angle switch | ✅ | `CreateMulticamGroup`, `SetMulticamAngle` |
+
+## Platform & distribution
+
+| Feature | State | Notes |
+|---|---|---|
+| Windows | ✅ | Primary target, dogfooded daily |
+| macOS / Linux — builds | ✅ | Green in CI on every push |
+| macOS / Linux — runtime QA | ⬜ | **Wanted:** run it, report what breaks |
+| Installer / packaged release | 🟡 | `tauri build` produces one; release flow being set up |
+| Linux preview on WebKitGTK | ⬜ | WebGPU lags there; may need a Chromium-based webview — see [preview-webview.md](preview-webview.md) risks. (The native per-OS preview, including the Wayland subsurface path, was removed in that migration's P4.) |
+| OTIO interop | ⬜ | PLAN.md §2; nobody has needed it yet |
+
+## Testing & infrastructure
+
+| Area | State | Notes |
+|---|---|---|
+| `renderly-core` tests | ✅ | 107 |
+| `renderly-app` (Rust) tests | ✅ | 16 |
+| `renderly-mcp` tests | 🟡 | 8 — thin for an agent-facing surface |
+| `renderly-cli` tests | ⬜ | **Zero.** Good first issue |
+| Frontend tests | ⬜ | Verification currently runs through the browser harness |
+| Export pixel-parity suite | ⬜ | Golden-frame comparisons, preview vs export |
+
+## Good first issues
+
+- `renderly-cli` integration tests — small surface, stable command API.
+- macOS or Linux runtime QA: install, run, file what breaks.
+- An asset pack — caption styles, LUTs, SFX, transitions
+  ([`examples/packs/starter`](../examples/packs/starter) is the template).
+- A WASM plugin effect ([`examples/plugins/invert`](../examples/plugins/invert), ~30 lines).
+- Chroma key as a WGSL pass — self-contained port of existing CPU code, sitting next to
+  effects that already work that way.
+
+## Recorded decision — inference runtime
+
+WASM frame plugins instantiate per call and copy full RGBA, which is unsuitable for
+RVM/BiRefNet. Phase 4.1 therefore ships **heuristic mattes** plus an optional
+**`RENDERLY_SEG_CLI`** escape hatch (same shape as the Whisper integration). Linking `ort`
+/ ONNX into core remains a follow-up pending AGPL-compatible license review — and never as
+a user-loadable native DLL plugin.

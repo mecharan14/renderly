@@ -142,6 +142,9 @@ Code or no-code, there's a way in — see [CONTRIBUTING.md](CONTRIBUTING.md). As
 plugins are the fastest path: [`examples/packs/starter`](examples/packs/starter),
 [`examples/plugins/invert`](examples/plugins/invert), [`examples/registry`](examples/registry).
 
+**[docs/parity-board.md](docs/parity-board.md)** is the board to pick work from — what's
+shipped, what's open, what's deliberately deferred, and a good-first-issue list.
+
 If you're an AI agent working in this repo, read [AGENTS.md](AGENTS.md) first — it is the
 enforceable contract for this codebase. (Yes, this project is partly built by the workflow it
 ships.)

@@ -1,0 +1,48 @@
+name: Feature request
+description: Propose a capability, or claim an item from the parity board
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check [docs/parity-board.md](../blob/main/docs/parity-board.md) first — the feature
+        may already be tracked there, and claiming an existing item is the fastest path.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What should Renderly be able to do?
+      description: Describe it from the user's side — what you'd do, and what should happen.
+    validations:
+      required: true
+
+  - type: input
+    id: board
+    attributes:
+      label: Parity board ID (if it's already listed)
+      placeholder: P4-ML, or leave blank if this is new
+
+  - type: dropdown
+    id: shape
+    attributes:
+      label: Where does this belong?
+      description: |
+        Renderly's rule is that every edit operation goes through the command API in
+        renderly-core — but plenty of features are better as an asset pack or a plugin,
+        which need no changes to core at all.
+      options:
+        - Core engine (new/changed command)
+        - Desktop app UI only
+        - Asset pack (no code)
+        - WASM plugin
+        - MCP / agent-facing
+        - Not sure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: claiming
+    attributes:
+      label: Are you planning to build it?
+      options:
+        - label: I'd like to work on this myself

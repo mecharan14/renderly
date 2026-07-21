@@ -1,0 +1,75 @@
+name: Bug report
+description: Something in the editor, CLI, or MCP server behaves wrong
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. If it's a preview/rendering issue, the single most useful
+        detail is whether it also happens **in the exported file** — that tells us
+        instantly whether it's the preview path or the engine.
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where did it happen?
+      options:
+        - Desktop app (renderly-app)
+        - CLI (renderly-cli)
+        - MCP server / agent editing (renderly-mcp)
+        - Export output
+        - Build / setup
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, what you got. Screenshots or a short clip help a lot for visual bugs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Import a 1080p60 clip
+        2. Split it, add a crossfade at the cut
+        3. Scrub across the transition
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      placeholder: Windows 11 26200 / macOS 15.2 / Ubuntu 24.04 (Wayland)
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Renderly version or commit
+      placeholder: v0.1.0, or the commit SHA you built from
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment details
+      description: |
+        `ffmpeg -version` (first line), GPU, and — for preview bugs — the value of
+        `window.__previewStats` from the webview devtools console (it reports the live
+        render mode and frame cost).
+      render: text
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Console / terminal output
+      description: Errors from the app's devtools console, or stderr from the CLI/MCP server.
+      render: text

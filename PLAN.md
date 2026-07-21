@@ -33,10 +33,10 @@ These four decisions make or break the project — everything else is negotiable
 
 | Concern | Choice | Notes |
 |---|---|---|
-| Media decode/encode | FFmpeg (via `ffmpeg-the-third` or FFI) | LGPL build, dynamically linked. Hardware accel: NVDEC/NVENC, Intel QSV, AMD AMF. |
-| GPU compositing | `wgpu` (DX12 on Windows, Vulkan/Metal elsewhere) | Render graph; every effect/transition is a WGSL shader node. |
-| Audio engine | `cpal` (output) + `symphonia` (decode) + `rubato` (resample) | Multi-track mixing, per-clip gain/fade, waveform generation. |
-| Text/captions | `cosmic-text` + `glyphon` (GPU text) | Custom animated caption renderer — TikTok-style word-by-word highlight styles as declarative presets. |
+| Media decode/encode | FFmpeg (via `ffmpeg-the-third` or FFI) | *As built: FFmpeg CLI subprocess; hardware accel via probed `-hwaccel`/NVENC/QSV flags. Linked FFmpeg deferred — see §3.1.* |
+| GPU compositing | `wgpu` (DX12 on Windows, Vulkan/Metal elsewhere) | Render graph; every effect/transition is a WGSL shader node. *Also compiled to wasm32/WebGPU for the preview.* |
+| Audio engine | `cpal` (output) + `symphonia` (decode) + `rubato` (resample) | *As built: FFmpeg premix + `rodio` sink — see §3.1.* |
+| Text/captions | `cosmic-text` + `glyphon` (GPU text) | *As built: `ab_glyph` CPU rasterization composited as a normal layer — works identically in export and in the wasm preview.* |
 | Speech-to-text | `whisper-rs` (whisper.cpp) | Local auto-captions with word-level timestamps. |
 | TTS voiceover | Local: Piper/Kokoro. Cloud: BYO keys (ElevenLabs, OpenAI TTS) | Voice-over track generated from script text inside the editor. |
 | Scene/silence detection | FFmpeg scene filter + custom audio analysis | Feeds the AI workflow: "find the kill at ~2:14". |
@@ -45,10 +45,16 @@ These four decisions make or break the project — everything else is negotiable
 
 ### App — Tauri 2 (`renderly-app`)
 
-- **Frontend:** Svelte (or React — pick by contributor comfort; Svelte is lighter for a canvas-heavy app) + TypeScript.
+- **Frontend:** ~~Svelte (or React — pick by contributor comfort)~~ → **React 19 + Zustand** + TypeScript (as built).
 - **Timeline:** custom canvas-rendered timeline (virtualized; never DOM-per-clip).
-- **Video preview: native, not webview.** The preview viewport is a native `wgpu` surface embedded in the window (child window via raw-window-handle). Frames go GPU→screen and never cross the webview bridge. This is the difference between "blazingly fast" and "electron-feeling".
-- Webview is only chrome: panels, inspectors, dialogs, media bin.
+- ~~**Video preview: native, not webview.**~~ → **Superseded (2026-07): the preview renders
+  in the webview**, on a canvas driven by `renderly-core`'s own compositor compiled to
+  wasm32 + WebGPU (`renderly-wasm`). Frames go decoder→GPU texture→canvas with no CPU
+  readback and no per-frame IPC, measured at 60 fps on 1080p60 with ~0.3 ms draw cost — so
+  the "electron-feeling" concern this bullet was written to prevent did not materialize.
+  The native child-window path was deleted; see the rationale and evidence in
+  [docs/preview-webview.md](docs/preview-webview.md).
+- Webview hosts everything: preview, panels, inspectors, dialogs, media bin.
 
 ### AI interface (`renderly-mcp`, `renderly-cli`)
 
@@ -66,9 +72,32 @@ Plus an `AGENTS.md`/instructions file in the repo so any coding agent knows how 
 
 Windows first (your machine, fastest dogfooding). Code stays cross-platform-clean (wgpu + FFmpeg + Tauri are all cross-platform); macOS/Linux CI builds turn on in Phase 3–4. Mobile: out of scope; the engine/UI split keeps the door open.
 
+### 3.1 As-built deviations (accepted)
+
+This plan is the original strategy document, kept as written. Where the implementation
+knowingly diverged, the decision and its rationale are recorded here rather than silently
+drifting.
+
+| Planned | As built | Why |
+|---|---|---|
+| Native `wgpu` child-window preview | Webview canvas driven by `renderly-wasm` (core's compositor on WebGPU) | OS child windows always composite *above* webview DOM, so direct-manipulation handles were unfixably hidden behind the video. The webview path measured at parity (60 fps 1080p60, ~0.3 ms draw), and sharing one compositor gives preview/export effect parity by construction. ~2,900 lines of per-OS window code deleted. [docs/preview-webview.md](docs/preview-webview.md) |
+| `cpal` + `symphonia` + `rubato` audio | FFmpeg premix → `rodio` sink (backend owns the master clock) | Reuses the filtergraph that export already needs; segmented premix fixed the startup latency. Re-evaluated during the preview migration and kept. Revisit if audible trim-drag scrubbing is wanted. |
+| `cosmic-text` + `glyphon` GPU text | `ab_glyph` CPU rasterization, composited as a layer | Simpler, and it compiles to wasm32 — which is what lets preview and export share one caption implementation. |
+| `ffmpeg-the-third` / linked FFmpeg | FFmpeg CLI subprocess behind a `VideoReader` boundary | Zero build-environment friction across contributors; the boundary keeps the migration open. Deferred until vcpkg/`FFMPEG_DIR` is wired everywhere. |
+| Svelte frontend | React 19 + Zustand | Contributor comfort, per the original bullet's own escape clause. |
+| MCP over stdio **+ HTTP** | stdio + a **loopback WebSocket bridge to the running app** | HTTP solved remote access, which nobody needed; the bridge solved co-editing, which turned out to be the actual product story — agent edits land in the open GUI and share the human's undo stack. [docs/bridge-protocol.md](docs/bridge-protocol.md) |
+| OTIO interop (§2) | Not built | No one has needed it yet; tracked on the parity board. |
+| Phase 4 ML models (RVM/BiRefNet) | Heuristics + optional `RENDERLY_SEG_CLI` | WASM plugins can't host these efficiently, and linking ONNX needs AGPL-compatible license review. See the recorded decision in [docs/parity-board.md](docs/parity-board.md). |
+
 ## 4. Feature roadmap
 
 Phased for a solo dev + Claude Code, side-project pace. Every phase ends in something you actually use for Ultra Bruno videos.
+
+> **Status (2026-07):** Phases 0–3 shipped; Phase 4 is in progress with heuristic
+> implementations landed. Live status per feature: [docs/parity-board.md](docs/parity-board.md).
+> Work delivered beyond this roadmap: the live agent bridge (co-editing with shared undo),
+> the WASM preview compositor, the project home screen / autosave lifecycle, and the
+> design system.
 
 ### Phase 0 — Skeleton (~first month)
 - Repo, CI (Windows build + test), AGPL license, contributing docs.
